@@ -91,7 +91,15 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 textarea { min-height: 110px; resize: vertical; }
 input[type="time"] { min-width: 0; }
 label.field { display: block; margin: 10px 0; }
-label.field > span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.field { margin: 10px 0; }
+
+/* 24-hour time: two compact lists, hours and minutes */
+.tfield { display: flex; align-items: center; gap: 4px; }
+.tfield select { flex: 1; min-width: 0; text-align: center; text-align-last: center; padding: 10px 4px; }
+.tfield b { color: var(--muted); font-weight: 400; }
+.tcompact { width: 132px; flex: none; }
+.sleeprow .fbody .fval { margin-top: 2px; }
 
 /* ---- pain marks shared by the week strip and the calendar ---- */
 .num {
@@ -284,6 +292,21 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 7px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; }
 
+/* ---- settings: modules with their factors ---- */
+details.mod { border-bottom: 1px solid var(--line); }
+details.mod:last-child { border-bottom: 0; }
+details.mod > summary { list-style: none; cursor: pointer; border-bottom: 0; }
+details.mod > summary::-webkit-details-marker { display: none; }
+details.mod[open] .fval { color: var(--accent); }
+.modbody { padding: 0 14px 14px 72px; }
+.chk { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 15px; }
+.chk input { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.chk span { flex: 1; }
+.chk button { padding: 4px 6px; font-size: 13px; }
+.addf { margin-top: 10px; }
+.banner.hint { position: relative; padding-right: 40px; }
+.banner.hint [data-hide-hint] { position: absolute; top: 6px; right: 4px; color: inherit; }
+
 /* ---- settings: theme picker ---- */
 .themes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .themes button { padding: 12px 6px; border-radius: 14px; font-size: 14px; box-shadow: inset 0 0 0 1px var(--line); }
@@ -291,23 +314,23 @@ th { color: var(--muted); font-weight: 500; }
 .themes .sw { display: flex; justify-content: center; gap: 3px; margin-bottom: 6px; }
 .themes .sw i { width: 14px; height: 14px; border-radius: 50%; }
 
-/* ---- report: light and printable whatever the theme ---- */
-.report {
-  --bg: #fff; --surface: #fff; --surface-2: #f2f2f2; --text: #111; --muted: #555; --line: #ddd; --accent: #3f6b56;
-  --none: #8fb8a0; --ha: #d4a07c; --mi: #a693c4; --per: #c98f9a;
-  --warn-bg: #fff4dc; --warn: #6e5214; --over-bg: #fde4e1; --over: #7f2f24; --ok-bg: #e2f0e7; --ok: #2f5b45;
-  background: #fff; color: #111; border-radius: var(--radius); padding: 18px; color-scheme: light;
-}
-.report h1 { color: #3f6b56; font-size: 22px; }
-.report .card { border: 1px solid #e4e4e4; }
+/* ---- report: the app's theme on screen, light only when printed or saved as PDF ---- */
+.report h1 { font-size: 22px; }
+.report .card { border: 1px solid var(--line); }
 .report table { font-size: 12.5px; }
 .strip { display: flex; flex-wrap: wrap; gap: 2px; }
-.strip i { width: 12px; height: 12px; border-radius: 50%; background: #ececec; }
+.strip i { width: 12px; height: 12px; border-radius: 50%; background: var(--surface-2); }
 .strip i.t-none { background: var(--none); }
 .strip i.t-headache { background: var(--ha); }
 .strip i.t-migraine { background: var(--mi); }
 @media print {
-  html, body { background: #fff; padding: 0; }
+  :root, :root[data-theme] {
+    --bg: #fff; --surface: #fff; --surface-2: #ececec; --text: #111; --muted: #555; --line: #ddd; --accent: #3f6b56;
+    --none: #8fb8a0; --ha: #d4a07c; --mi: #a693c4; --per: #c98f9a;
+    --warn-bg: #fff4dc; --warn: #6e5214; --over-bg: #fde4e1; --over: #7f2f24; --ok-bg: #e2f0e7; --ok: #2f5b45;
+    color-scheme: light;
+  }
+  html, body { background: #fff; color: #111; padding: 0; }
   .tabs, .noprint, #toast, #dim { display: none !important; }
   main { max-width: none; padding: 0; }
   .report { padding: 0; }

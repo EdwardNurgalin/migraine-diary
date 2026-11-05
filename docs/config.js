@@ -65,17 +65,40 @@ export const DEFAULT_MODULES = MODULES.map(m => m.key);
 
 export const MED_KINDS = ['simple', 'triptan', 'combo', 'opioid', 'ergot', 'preventive', 'other'];
 
-export function isExposed(key, value) {
-  const f = FACTORS[key];
-  if (!f || value == null) return false;
-  return f.type === 'bool' ? !!value : Number(value) >= f.exposed;
+// Factors people add themselves: a yes/no, a level or a number, in any module.
+export const CUSTOM_TYPES = { bool: 'Да / нет', level: 'Нет … сильно', count: 'Число' };
+
+export function customFactor(label, type, module) {
+  return {
+    key: `c_${Date.now().toString(36)}`,
+    label: label.trim().slice(0, 40),
+    icon: '✦',
+    type,
+    exposed: type === 'bool' ? true : type === 'level' ? 2 : 1,
+    max: type === 'count' ? 20 : undefined,
+    module,
+    custom: true,
+  };
 }
 
-export function validValue(key, value) {
-  const f = FACTORS[key];
-  if (!f) return false;
-  if (f.type === 'bool') return typeof value === 'boolean';
+/** Built-in modules plus the user's own factors; switched-off factors are kept but marked. */
+export function buildModules(custom = [], disabled = []) {
+  return MODULES.map(m => ({
+    ...m,
+    factors: [...m.factors, ...custom.filter(c => c.module === m.key)].map(f => ({ ...f, enabled: !disabled.includes(f.key) })),
+  }));
+}
+
+export const factorMap = modules => Object.fromEntries(modules.flatMap(m => m.factors.map(f => [f.key, f])));
+
+export function isExposed(def, value) {
+  if (!def || value == null) return false;
+  return def.type === 'bool' ? !!value : Number(value) >= def.exposed;
+}
+
+export function validValue(def, value) {
+  if (def.type === 'bool') return typeof value === 'boolean';
   if (typeof value !== 'number' || Number.isNaN(value)) return false;
-  const hi = f.type === 'level' ? 3 : (f.max ?? 24);
+  const hi = def.type === 'level' ? 3 : (def.max ?? 24);
   return value >= 0 && value <= hi;
 }

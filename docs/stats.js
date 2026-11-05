@@ -1,6 +1,7 @@
 // Aggregates for "Мои данные", the calendar and the doctor report.
 import { FACTORS, isExposed } from './config.js';
 
+
 // ICHD-3 medication-overuse thresholds: days per month with acute medication.
 // Triptans, ergots, opioids and combination analgesics: >=10 days; simple analgesics/NSAIDs: >=15 days;
 // any mix of acute classes: >=10 days.
@@ -119,7 +120,7 @@ export function cycle(days) {
  * @param health   {date: row}
  * @param meds     all medication records
  */
-export function summary({ from, to, days, weather, health, meds }) {
+export function summary({ from, to, days, weather, health, meds, factors = FACTORS }) {
   const medsById = new Map(meds.map(m => [m.id, m]));
   const inRange = days.filter(d => d.date >= from && d.date <= to);
   const byDate = new Map(inRange.map(d => [d.date, d]));
@@ -186,7 +187,7 @@ export function summary({ from, to, days, weather, health, meds }) {
     symptoms: count('symptoms'),
     locations: count('location'),
     characters: count('character'),
-    factors: factorAnalysis(inRange, series),
+    factors: factorAnalysis(inRange, series, factors),
     attacks,
     overuse: overuse(days, medsById, to),
   };
@@ -196,7 +197,7 @@ export function summary({ from, to, days, weather, health, meds }) {
  * Compare how often the head hurts on days with vs. without each factor.
  * A factor counts only on days where it was answered (missing key = unknown, not "no").
  */
-function factorAnalysis(logged, series) {
+function factorAnalysis(logged, series, defs) {
   if (logged.length < MIN_DAYS_FOR_FACTORS) {
     return { ready: false, need: MIN_DAYS_FOR_FACTORS, have: logged.length, items: [] };
   }
@@ -207,7 +208,7 @@ function factorAnalysis(logged, series) {
     if (isOn) exposed[k].add(date);
   };
   for (const d of logged) {
-    for (const [k, v] of Object.entries(d.factors || {})) if (FACTORS[k]) mark(k, d.date, isExposed(k, v));
+    for (const [k, v] of Object.entries(d.factors || {})) if (defs[k]) mark(k, d.date, isExposed(defs[k], v));
     mark('period', d.date, d.period);
   }
   for (const p of series) {

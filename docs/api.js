@@ -1,5 +1,5 @@
 // The diary's data layer: what used to be the server API, now running on the phone.
-import { DEFAULT_MODULES, DERIVED, MED_KINDS, MODULES, validValue } from './config.js';
+import { CUSTOM_TYPES, DEFAULT_MODULES, DERIVED, MED_KINDS, MODULES, buildModules, customFactor, factorMap, validValue } from './config.js';
 import * as stats from './stats.js';
 import * as store from './store.js';
 import * as weather from './weather.js';
@@ -17,8 +17,32 @@ function withMigraine(day) {
   return day && { ...day, attacks: day.attacks.map(a => ({ ...a, migraine: stats.isMigraine(a) })) };
 }
 
+async function modules() {
+  const [custom, disabled] = await Promise.all([store.getSetting('custom_factors', []), store.getSetting('disabled_factors', [])]);
+  return buildModules(custom, disabled);
+}
+
 export async function config() {
-  return { modules: MODULES, derived: DERIVED, enabled: await store.getSetting('modules', DEFAULT_MODULES) };
+  return { modules: await modules(), derived: DERIVED, enabled: await store.getSetting('modules', DEFAULT_MODULES) };
+}
+
+export async function addFactor(label, type, module) {
+  if (!label.trim()) throw new Error('Введите название');
+  if (!CUSTOM_TYPES[type] || !MODULES.some(m => m.key === module)) throw new Error('Некорректный фактор');
+  const custom = await store.getSetting('custom_factors', []);
+  await store.setSetting('custom_factors', [...custom, customFactor(label, type, module)]);
+}
+
+/** Removes the user's own factor from the form; values already recorded stay in old days. */
+export async function removeFactor(key) {
+  const custom = await store.getSetting('custom_factors', []);
+  await store.setSetting('custom_factors', custom.filter(f => f.key !== key));
+}
+
+export async function setFactorEnabled(key, on) {
+  const disabled = new Set(await store.getSetting('disabled_factors', []));
+  on ? disabled.delete(key) : disabled.add(key);
+  await store.setSetting('disabled_factors', [...disabled]);
 }
 
 export async function day(date) {
@@ -35,8 +59,11 @@ export async function saveDay(date, body) {
     if (!known.has(x.med_id)) throw new Error('Неизвестное лекарство');
     if (!EFFECTS.has(x.effect)) throw new Error('Некорректный эффект');
   }
-  for (const [k, v] of Object.entries(body.factors)) {
-    if (!validValue(k, v)) throw new Error(`Некорректное значение фактора: ${k}`);
+  const defs = factorMap(await modules());
+  // Keys of factors that no longer exist (a removed custom factor) are dropped, not rejected.
+  const factors = Object.fromEntries(Object.entries(body.factors).filter(([k]) => defs[k]));
+  for (const [k, v] of Object.entries(factors)) {
+    if (!validValue(defs[k], v)) throw new Error(`Некорректное значение: ${defs[k].label}`);
   }
   for (const a of body.attacks) {
     if (!(a.intensity >= 1 && a.intensity <= 10)) throw new Error('Сила боли — от 1 до 10');
@@ -44,15 +71,25 @@ export async function saveDay(date, body) {
   await store.put('days', {
     date,
     headache: !!body.headache,
-    factors: body.factors,
+    factors,
     period: !!body.period,
-    sleep_hours: body.sleep_hours ?? null,
+    sleep_hours: body.sleep_hours ?? hoursBetween(body.sleep_start, body.sleep_end),
+    sleep_start: body.sleep_start || null,
+    sleep_end: body.sleep_end || null,
     note: body.note || '',
     attacks: body.headache ? body.attacks : [],
     doses: body.doses,
     updated_at: new Date().toISOString(),
   });
   return day(date);
+}
+
+/** Sleep length from "fell asleep" and "woke up" times (across midnight), in hours with one decimal. */
+function hoursBetween(a, b) {
+  if (!a || !b) return null;
+  let m = (+b.slice(0, 2) * 60 + +b.slice(3, 5)) - (+a.slice(0, 2) * 60 + +a.slice(3, 5));
+  if (m <= 0) m += 1440;
+  return Math.round(m / 6) / 10;
 }
 
 export const deleteDay = date => store.del('days', date);
@@ -86,10 +123,10 @@ export async function summary(from, to) {
   await refreshWeather();
   // Overuse looks 30 days back from `to`, so load a bit more than the range itself.
   const loadFrom = [from, stats.addDays(to, -29)].sort()[0];
-  const [days, w, h, meds] = await Promise.all([
-    store.getAll('days', loadFrom, to), store.getAll('weather', from, to), store.getAll('health', from, to), store.getAll('meds'),
+  const [days, w, h, meds, mods] = await Promise.all([
+    store.getAll('days', loadFrom, to), store.getAll('weather', from, to), store.getAll('health', from, to), store.getAll('meds'), modules(),
   ]);
-  return stats.summary({ from, to, days, weather: byDate(w), health: byDate(h), meds });
+  return stats.summary({ from, to, days, weather: byDate(w), health: byDate(h), meds, factors: factorMap(mods) });
 }
 
 export function month(ym) {
@@ -118,6 +155,12 @@ export async function addMed(m) {
 }
 
 export const updateMed = (id, m) => store.put('meds', { id, ...checkMed(m) });
+
+/** Hidden from lists and the form, but kept so old entries still show the medication's name. */
+export async function deleteMed(id) {
+  const m = await store.get('meds', id);
+  if (m) await store.put('meds', { ...m, active: false, deleted: true });
+}
 
 // ---------- settings ----------
 
@@ -222,35 +265,106 @@ export async function csv() {
 
 const pick = (o, keys) => Object.fromEntries(keys.map(k => [k, o?.[k] ?? null]));
 
-/** Plain-text digest to paste into a chat with Claude for a monthly review. */
-export async function claudeDigest(from, to) {
-  const s = await summary(from, to);
+const KIND_RU = {
+  simple: 'простое обезболивающее / НПВС', triptan: 'триптан', combo: 'комбинированное обезболивающее', opioid: 'опиоид',
+  ergot: 'эрготамин', preventive: 'профилактика', other: 'другое',
+};
+const LOC_RU = { left: 'слева', right: 'справа', both: 'с двух сторон', forehead: 'лоб', temples: 'виски', back: 'затылок', eye: 'вокруг глаза' };
+const CHAR_RU = { pulsating: 'пульсирующая', pressing: 'давящая', squeezing: 'сжимающая', stabbing: 'колющая', dull: 'тупая' };
+const SYM_RU = {
+  nausea: 'тошнота', vomiting: 'рвота', photo: 'светобоязнь', phono: 'звукобоязнь', smell: 'непереносимость запахов',
+  aura: 'аура', dizziness: 'головокружение', movement: 'усиление от движения',
+};
+const EFF_RU = { full: 'помогло', partial: 'помогло частично', none: 'не помогло' };
+const ru = (dict, keys) => keys.map(k => dict[k] || k).join(', ');
+const minutesBetween = (a, b) => {
+  if (!a || !b) return null;
+  const m = (+b.slice(0, 2) * 60 + +b.slice(3, 5)) - (+a.slice(0, 2) * 60 + +a.slice(3, 5));
+  return m < 0 ? m + 1440 : m;
+};
+
+/**
+ * A ready-to-paste request for any AI chat (ChatGPT, Claude, Gemini, YandexGPT, GigaChat):
+ * instructions written like a brief for a careful headache assistant, then the diary as compact lines.
+ */
+export async function aiPrompt(from, to) {
+  const [s, cyc, mods] = await Promise.all([summary(from, to), cycle(), modules()]);
   const [days, meds] = await Promise.all([store.getAll('days', from, to), store.getAll('meds')]);
+  const W = byDate(await store.getAll('weather', from, to));
+  const defs = factorMap(mods);
   const medsById = new Map(meds.map(m => [m.id, m]));
+  const months = s.total_days / 30;
+  const per30 = n => Math.round(n / months * 10) / 10;
+
   const lines = days.sort((a, b) => a.date.localeCompare(b.date)).map(d => {
-    const parts = [d.date, d.headache ? 'БОЛЬ' : 'без боли'];
+    const parts = [d.date];
+    if (!d.attacks.length) parts.push(d.headache ? 'боль (без подробностей)' : 'без боли');
     for (const a of d.attacks) {
-      parts.push(`${a.start_time || '?'}–${a.end_time || '?'}, сила ${a.intensity}/10${stats.isMigraine(a) ? ', мигренеподобный' : ''}`,
-        [a.location, a.character, a.symptoms].map(x => x.join(',')).filter(Boolean).join('; '));
+      const dur = minutesBetween(a.start_time, a.end_time);
+      parts.push([
+        stats.isMigraine(a) ? 'боль, похоже на мигрень' : 'боль',
+        `${a.start_time || '?'}–${a.end_time || 'не отмечено'}${dur != null ? ` (${Math.floor(dur / 60)} ч ${dur % 60} мин)` : ''}`,
+        `сила ${a.intensity}/10`,
+        [ru(LOC_RU, a.location), ru(CHAR_RU, a.character), ru(SYM_RU, a.symptoms)].filter(Boolean).join('; '),
+      ].filter(Boolean).join(', '));
     }
-    const ds = stats.allDoses(d).map(x => `${medsById.get(x.med_id)?.name || '?'} (${x.effect || 'эффект?'})`);
-    if (ds.length) parts.push('лекарства: ' + ds.join(', '));
-    const f = Object.entries(d.factors).filter(([, v]) => v && v !== 0).map(([k, v]) => v === true ? k : `${k}=${v}`);
+    const doses = stats.allDoses(d).map(x => {
+      const m = medsById.get(x.med_id);
+      const delay = minutesBetween(d.attacks[0]?.start_time, x.time);
+      return `${m ? `${m.name} ${m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null && d.attacks.length ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}`;
+    });
+    if (doses.length) parts.push('лекарства: ' + doses.join('; '));
+    const f = Object.entries(d.factors)
+      .filter(([k, v]) => defs[k] && v && v !== 0)
+      .map(([k, v]) => {
+        const def = defs[k];
+        return def.type === 'bool' ? def.label.toLowerCase() : def.type === 'level' ? `${def.label.toLowerCase()}: ${['нет', 'немного', 'заметно', 'сильно'][v]}` : `${def.label.toLowerCase()}: ${v}`;
+      });
     if (f.length) parts.push('факторы: ' + f.join(', '));
+    const cd = cyc.dayOf(d.date);
     if (d.period) parts.push('менструация');
-    if (d.sleep_hours != null) parts.push(`сон ${d.sleep_hours} ч`);
+    else if (cd) parts.push(`${cd}-й день цикла`);
+    if (d.sleep_start && d.sleep_end) parts.push(`сон ${d.sleep_start}–${d.sleep_end} (${d.sleep_hours} ч)`);
+    else if (d.sleep_hours != null) parts.push(`сон ${d.sleep_hours} ч`);
+    const w = W[d.date];
+    if (w?.pressure != null) parts.push(`давление ${Math.round(w.pressure)} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta} за сутки)` : ''}`);
     if (d.note) parts.push(`заметка: ${d.note}`);
-    return parts.filter(Boolean).join(' | ');
+    return parts.join(' | ');
   });
-  return [
-    'Ниже мой дневник головной боли. Проанализируй его как внимательный помощник (не ставь диагноз):',
-    'частота и динамика приступов, возможные провокаторы и защитные факторы, эффективность лекарств,',
-    'риск лекарственно-индуцированной головной боли, что обсудить с неврологом. Ответь по-русски, кратко и по пунктам.',
-    '',
-    `Период: ${from} — ${to}. Заполнено дней: ${s.logged_days} из ${s.total_days}. Дней с болью: ${s.headache_days}, мигренеподобных: ${s.migraine_days}. ` +
-      `Средняя сила: ${s.avg_intensity ?? '—'}. Дней с обезболивающими: ${s.med_days}.`,
-    `Лекарства: ${meds.map(m => `${m.name} ${m.dose} (${m.kind})`).join(', ') || 'не указаны'}.`,
-    '',
-    ...lines,
-  ].join('\n');
+
+  const cycleText = cyc.cycleLen
+    ? `средняя длина цикла ${cyc.cycleLen} дн., менструация ${cyc.periodLen} дн., последняя началась ${cyc.periods.at(-1).start}` +
+      (cyc.forecast.length ? `, следующая ожидается ${cyc.forecast[0]}` : '')
+    : cyc.periods.length ? `отмечено менструаций: ${cyc.periods.length}, для расчёта цикла пока мало данных` : 'цикл не отмечался';
+  const o = s.overuse;
+
+  return `Ты — внимательный помощник по головной боли. Ты хорошо знаешь международную классификацию головных болей ICHD-3 и современные рекомендации по мигрени. Ниже мой дневник головной боли. Разбери его так, чтобы мне было понятно, а неврологу — полезно.
+
+Правила:
+— Опирайся только на эти данные. Ничего не додумывай. Если вывод держится на нескольких днях, так и скажи и укажи, сколько наблюдений за ним стоит.
+— Не ставь диагноз и не назначай лечение. Пиши «похоже на…», «стоит обсудить с врачом…».
+— Отделяй совпадения от причин. По каждому возможному провокатору сравни: как часто болела голова в дни с ним и без него, и проверь сдвиг на сутки (фактор вчера — боль сегодня).
+— Пиши по-русски, коротко, по пунктам, без общих советов из интернета. Где можно — с числами.
+
+Что сделать:
+0. Тревожные признаки. Если в записях есть то, с чем нужно срочно к врачу (внезапная сильнейшая «громоподобная» боль, впервые возникшая или резко изменившаяся боль, слабость, онемение или нарушения речи, боль с температурой, после травмы, приступы становятся заметно чаще), — начни с этого.
+1. Итоги периода: дни с головной болью в пересчёте на месяц, из них похожих на мигрень; средняя и максимальная сила; типичная длительность; динамика по неделям. Эпизодическая или хроническая картина (хроническая — 15 и более дней с болью в месяц дольше 3 месяцев).
+2. Характер приступов: какие признаки мигрени по ICHD-3 встречаются (односторонняя, пульсирующая, сила от умеренной, усиление от движения, тошнота или рвота, свето- и звукобоязнь, аура), а какие приступы больше похожи на головную боль напряжения.
+3. Лекарства: дни с обезболивающими и отдельно с триптанами в месяц; риск лекарственно-индуцированной головной боли (порог — 10 дней в месяц для триптанов, эрготаминов, опиоидов и комбинированных, 15 — для простых обезболивающих и НПВС). Насколько помогает каждое средство и зависит ли эффект от того, как быстро после начала боли его приняли.
+4. Провокаторы и защитные факторы: сон (время отхода ко сну и продолжительность), стресс и расслабление после него, пропуски еды, кофеин и его нехватка, алкоголь, экран, физическая нагрузка, перепады атмосферного давления (±5 гПа за сутки), менструальный цикл (особенно дни от −2 до +3 от начала менструации — так проявляется менструальная мигрень). Для каждого — насколько связь убедительна.
+5. Ранние сигналы: что чаще всего бывает накануне приступа и может служить предупреждением.
+6. Прогноз: на какие дни ближайших двух недель стоит обратить внимание и что можно сделать заранее.
+7. Что обсудить с неврологом: 5–7 конкретных вопросов по моим данным.
+8. Как вести дневник точнее: чего не хватает в записях, чтобы выводы стали надёжнее.
+В конце задай мне 2–3 уточняющих вопроса, которые сильнее всего улучшат разбор.
+
+Сводка за период ${from} — ${to}:
+— заполнено ${s.logged_days} из ${s.total_days} дней (незаполненные дни — неизвестно, а не «без боли»);
+— дней с головной болью ${s.headache_days} (≈${per30(s.headache_days)} в месяц), из них похожих на мигрень ${s.migraine_days}; приступов ${s.attack_count}, средняя сила ${s.avg_intensity ?? '—'} из 10;
+— дней с обезболивающими ${s.med_days}; за последние 30 дней: триптаны и подобные — ${o.specific.days}, простые обезболивающие — ${o.simple.days}, всего — ${o.any.days};
+— лекарства: ${meds.filter(m => !m.deleted || s.med_effect.some(e => e.name === m.name)).map(m => `${m.name} ${m.dose}`.trim() + ` (${KIND_RU[m.kind]})`).join('; ') || 'не указаны'};
+— менструальный цикл: ${cycleText}.
+
+Дневник по дням (дата | боль: время, длительность, сила, где и какая, симптомы | лекарства | факторы | цикл | сон | давление | заметка):
+${lines.join('\n') || '(записей за период нет)'}`;
 }

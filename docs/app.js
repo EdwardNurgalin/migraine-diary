@@ -56,7 +56,8 @@ const standalone = () => window.matchMedia('(display-mode: standalone)').matches
 let CFG = null, meds = [];
 async function loadBase() { [CFG, meds] = await Promise.all([api.config(), api.meds()]); }
 const medById = id => meds.find(m => m.id === id);
-const enabledModules = () => CFG.modules.filter(m => CFG.enabled.includes(m.key));
+const enabledModules = () => CFG.modules.filter(m => CFG.enabled.includes(m.key))
+  .map(m => ({ ...m, factors: m.factors.filter(f => f.enabled) }));
 function factorDef(k) {
   for (const m of CFG.modules) for (const f of m.factors) if (f.key === k) return f;
   return CFG.derived[k] ? { key: k, ...CFG.derived[k] } : { key: k, label: k, icon: '•' };
@@ -161,8 +162,9 @@ async function renderDiary(d) {
 
   $view.innerHTML = `
     <h1>Дневник</h1>
-    ${!standalone() ? `<div class="banner warn"><b>Установите дневник на экран «Домой»</b>
-      <p style="font-size:14px">Safari → «Поделиться» → «На экран „Домой“», и дальше открывайте только иконку. На iPhone у Safari и у иконки разные хранилища: записи, сделанные здесь, в иконке не появятся.</p></div>` : ''}
+    ${showInstallHint() ? `<div class="banner warn hint"><button class="ghost" data-hide-hint aria-label="Скрыть подсказку">✕</button>
+      <b>Добавьте дневник на экран «Домой»</b>
+      <p style="font-size:14px">«Поделиться» → «На экран „Домой“». Дальше открывайте иконку: записи из вкладки Safari в ней не появятся.</p></div>` : ''}
     <div class="weekstrip">${strip}<a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
     ${day.day ? dayCard(day) : `
       <p class="question">Болела ли голова ${dayWord(d)}?</p>
@@ -174,7 +176,11 @@ async function renderDiary(d) {
       <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
       <button class="primary" data-backup style="margin-top:6px">Сохранить копию</button></div>` : ''}`;
   $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
+  $view.querySelector('[data-hide-hint]')?.addEventListener('click', e => { pref.set('install_hint_hidden', '1'); e.target.closest('.banner').remove(); });
 }
+
+// The hint matters only in Safari on iPhone/iPad, where the browser tab and the Home Screen app keep separate data.
+const showInstallHint = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && !standalone() && pref.get('install_hint_hidden') !== '1';
 
 const dayType = data => !data.day.headache ? 'none' : data.attacks.some(x => x.migraine) ? 'migraine' : 'headache';
 const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; };
@@ -192,7 +198,7 @@ function dayCard(data) {
     if (a.symptoms.length) rows.push(['Симптомы', esc(labelsOf(L.symptoms, a.symptoms))]);
   }
   if (allDoses.length) rows.push(['Лекарства', allDoses.map(doseText).join('<br>')]);
-  if (day.sleep_hours != null) rows.push(['Сон', `${day.sleep_hours} ч`]);
+  if (day.sleep_hours != null) rows.push(['Сон', `${fmtHours(day.sleep_hours)}${day.sleep_start && day.sleep_end ? ` · ${day.sleep_start}–${day.sleep_end}` : ''}`]);
   if (day.period) rows.push(['Цикл', 'Менструация']);
   if (exposed.length) rows.push(['Факторы', `<div class="tags">${exposed.map(([f, v]) => `<span class="tag">${f.icon} ${esc(f.label)}${f.type !== 'bool' ? ': ' + factorValueText(f, v).toLowerCase() : ''}</span>`).join('')}</div>`]);
   if (w) rows.push(['Погода', `${w.pressure ?? '—'} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta})` : ''}, ${w.temp ?? '—'}°C`]);
@@ -220,6 +226,8 @@ async function startWizard(d, headache) {
     factors: { ...(day?.factors || {}) },
     period: !!day?.period,
     sleep_hours: day?.sleep_hours ?? data.health?.sleep_hours ?? null,
+    sleep_start: day?.sleep_start || '',
+    sleep_end: day?.sleep_end || '',
     note: day?.note || '',
     attack: a ? {
       start_time: a.start_time || '', end_time: a.end_time || '', intensity: a.intensity,
@@ -235,7 +243,7 @@ async function startWizard(d, headache) {
   const steps = headache
     ? [{ kind: 'attack' }, { kind: 'symptoms' }, { kind: 'meds' }, ...modules, { kind: 'notes' }]
     : [...modules, { kind: 'meds' }, { kind: 'notes' }];
-  wz = { date: d, steps, step: 0, draft, dirty: false, existed: !!day };
+  wz = { date: d, steps, step: 0, draft, dirty: false, existed: !!day, healthSleep: day?.sleep_hours == null && data.health?.sleep_hours != null };
   drawWizard();
 }
 
@@ -256,6 +264,25 @@ function factorRow(f, v) {
     ${factorControl(f, v)}</div>`;
 }
 
+// Hours and minutes as two lists, so time is always 24-hour whatever the phone's region settings.
+function timeField(path, value, label = '') {
+  const [h, m] = value ? value.split(':') : ['', ''];
+  const mins = [...new Set([...Array.from({ length: 12 }, (_, i) => pad(i * 5)), ...(m ? [m] : [])])].sort();
+  const opt = (x, cur) => `<option ${x === cur ? 'selected' : ''}>${x}</option>`;
+  return `${label ? `<span class="tlabel">${label}</span>` : ''}<div class="tfield" data-path="${path}">
+    <select data-time="h" aria-label="${label || 'Время'}: часы"><option value="">--</option>${Array.from({ length: 24 }, (_, i) => opt(pad(i), h)).join('')}</select>
+    <b>:</b>
+    <select data-time="m" aria-label="${label || 'Время'}: минуты"><option value="">--</option>${mins.map(x => opt(x, m)).join('')}</select></div>`;
+}
+
+const sleepHours = (a, b) => {
+  if (!a || !b) return null;
+  let m = (+b.slice(0, 2) * 60 + +b.slice(3)) - (+a.slice(0, 2) * 60 + +a.slice(3));
+  if (m <= 0) m += 1440;
+  return Math.round(m / 6) / 10;
+};
+const fmtHours = h => h == null ? '' : `${Math.floor(h)} ч${Math.round(h % 1 * 60) ? ` ${Math.round(h % 1 * 60)} мин` : ''}`;
+
 function pills(path, dict, selected) {
   return `<div class="pills">${Object.entries(dict).map(([k, v]) =>
     `<button class="pill ${selected.includes(k) ? 'on' : ''}" data-act="toggle" data-path="${path}" data-val="${k}">${esc(v)}</button>`).join('')}</div>`;
@@ -270,7 +297,7 @@ function doseList(path, list) {
         <select data-path="${path}.${i}.med_id" data-type="number" aria-label="Лекарство">
           ${meds.filter(m => m.active || m.id === x.med_id).map(m => `<option value="${m.id}" ${m.id === x.med_id ? 'selected' : ''}>${esc(m.name)} ${esc(m.dose)}</option>`).join('')}
         </select>
-        <input type="time" data-path="${path}.${i}.time" value="${esc(x.time)}" aria-label="Время приёма">
+        <div class="tcompact">${timeField(`${path}.${i}.time`, x.time)}</div>
         <button class="ghost" data-act="rm-dose" data-path="${path}" data-i="${i}" aria-label="Удалить">✕</button>
       </div>
       <div class="pills" style="margin-top:10px">${Object.entries(L.effects).map(([k, v]) =>
@@ -286,8 +313,8 @@ function stepBody(st) {
       <h1>Приступ</h1><p class="wiz-sub">${fmtDateFull(wz.date)}</p>
       <div class="card">
         <div class="row" style="flex-wrap:nowrap">
-          <label class="field" style="flex:1"><span>Началась</span><input type="time" data-path="attack.start_time" value="${esc(a.start_time)}"></label>
-          <label class="field" style="flex:1"><span>Закончилась</span><input type="time" data-path="attack.end_time" value="${esc(a.end_time)}"></label>
+          <div class="field" style="flex:1">${timeField('attack.start_time', a.start_time, 'Началась')}</div>
+          <div class="field" style="flex:1">${timeField('attack.end_time', a.end_time, 'Закончилась')}</div>
         </div>
         <p class="muted">Если ещё болит, оставьте «Закончилась» пустым и допишите позже.</p>
       </div>
@@ -311,8 +338,13 @@ function stepBody(st) {
     case 'module': {
       const m = st.module;
       const extra = m.key === 'sleep' ? `
-        <div class="frow"><span class="fic">🌙</span><div class="fbody"><div class="flabel">Сон, часов</div>${dr.sleep_hours == null ? '<div class="fval">не указано</div>' : ''}</div>
-          <div class="stepper"><button data-act="sleep" data-d="-0.5" aria-label="Меньше">−</button><b>${dr.sleep_hours ?? '—'}</b><button data-act="sleep" data-d="0.5" aria-label="Больше">+</button></div></div>`
+        <div class="frow sleeprow"><span class="fic">🌙</span><div class="fbody">
+          <div class="row" style="flex-wrap:nowrap;align-items:flex-start">
+            <div style="flex:1">${timeField('sleep_start', dr.sleep_start, 'Заснула')}</div>
+            <div style="flex:1">${timeField('sleep_end', dr.sleep_end, 'Проснулась')}</div>
+          </div>
+          <div class="fval" id="sleepDur">${dr.sleep_hours != null ? `Сон: ${fmtHours(dr.sleep_hours)}${!dr.sleep_start && wz.healthSleep ? ' (из «Здоровья»)' : ''}` : 'Укажите, когда заснули и проснулись'}</div>
+        </div></div>`
         : m.key === 'women' ? `
         <div class="frow"><span class="fic">🩸</span><div class="fbody"><div class="flabel">Менструация</div><div class="fval">${dr.period ? 'Да' : 'Нет'}</div></div>
           <button class="switch ${dr.period ? 'on' : ''}" data-act="period" role="switch" aria-label="Менструация"></button></div>` : '';
@@ -358,7 +390,9 @@ function wizardPayload() {
     headache: dr.headache,
     factors,
     period: dr.period,
-    sleep_hours: dr.sleep_hours,
+    sleep_hours: sleepHours(dr.sleep_start, dr.sleep_end) ?? dr.sleep_hours,
+    sleep_start: dr.sleep_start || null,
+    sleep_end: dr.sleep_end || null,
     note: dr.note,
     attacks: dr.headache ? [{ ...a, start_time: a.start_time || null, end_time: a.end_time || null, doses: clean(a.doses) }] : [],
     doses: clean(dr.doses),
@@ -398,7 +432,6 @@ async function wizardAction(el) {
       dr.factors[f.key] = Math.min(Math.max((dr.factors[f.key] || 0) + step, 0), f.max ?? 24);
       break;
     }
-    case 'sleep': dr.sleep_hours = Math.min(Math.max((dr.sleep_hours ?? 7) + Number(el.dataset.d), 0), 24); break;
     case 'period': dr.period = !dr.period; break;
     case 'toggle': {
       const arr = getPath(dr, el.dataset.path), v = el.dataset.val;
@@ -429,6 +462,19 @@ $view.addEventListener('click', e => {
 
 $view.addEventListener('input', e => {
   const el = e.target;
+  const tf = el.closest('.tfield');
+  if (wz && tf) {
+    const [hs, ms] = tf.querySelectorAll('select');
+    if (hs.value && !ms.value) ms.value = '00';
+    setPath(wz.draft, tf.dataset.path, hs.value ? `${hs.value}:${ms.value}` : '');
+    wz.dirty = true;
+    if (tf.dataset.path.startsWith('sleep_')) {
+      const h = sleepHours(wz.draft.sleep_start, wz.draft.sleep_end);
+      if (h != null) wz.draft.sleep_hours = h;
+      document.getElementById('sleepDur').textContent = h != null ? `Сон: ${fmtHours(h)}` : 'Укажите, когда заснули и проснулись';
+    }
+    return;
+  }
   if (!wz || !el.dataset.path) return;
   const v = el.dataset.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value;
   setPath(wz.draft, el.dataset.path, v);
@@ -767,7 +813,7 @@ async function renderReport(from, to) {
       ${overuseBanner(s.overuse)}
       <div class="card"><h2>Календарь</h2>
         <div class="strip">${s.series.map(p => `<i class="${p.type ? 't-' + p.type : ''}" title="${fmtDate(p.date)}"></i>`).join('')}</div>
-        <div class="legend"><span><i style="background:var(--none)"></i>без боли</span><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span><span><i style="background:#ececec"></i>нет записи</span></div>
+        <div class="legend"><span><i style="background:var(--none)"></i>без боли</span><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span><span><i style="background:var(--surface-2)"></i>нет записи</span></div>
       </div>
       ${s.med_effect.length ? `<div class="card"><h2>Препараты</h2><table>
         <tr><th>Препарат</th><th>Приёмов</th><th>Помогло</th><th>Частично</th><th>Нет</th></tr>
@@ -829,7 +875,10 @@ async function saveBackup() {
 // ---------- settings ----------
 
 async function renderSettings() {
-  const [s, list, digest] = await Promise.all([api.settings(), api.meds(), api.claudeDigest(addDays(today(), -29), today()), prepareBackup()]);
+  const [s, list] = await Promise.all([api.settings(), api.meds(), prepareBackup()]);
+  CFG = await api.config();
+  const aiDays = Number(pref.get('ai_days', 90));
+  let prompt = await api.aiPrompt(addDays(today(), -(aiDays - 1)), today());
   meds = list;
   const csv = await api.csv();
   $view.innerHTML = `
@@ -844,16 +893,29 @@ async function renderSettings() {
     </div>
     <h3>Разделы дневника</h3>
     <div class="list">${CFG.modules.map(m => `
-      <div class="frow"><span class="fic">${m.icon}</span><div class="fbody"><div class="flabel">${m.title}</div>
-        <div class="fval">${m.factors.map(f => f.label).join(', ')}</div></div>
-        <button class="switch ${s.modules.includes(m.key) ? 'on' : ''}" data-module="${m.key}" role="switch" aria-label="${esc(m.title)}"></button></div>`).join('')}
+      <details class="mod">
+        <summary class="frow"><span class="fic">${m.icon}</span><div class="fbody"><div class="flabel">${m.title}</div>
+          <div class="fval">${m.factors.filter(f => f.enabled).length} из ${m.factors.length} · настроить</div></div>
+          <button class="switch ${s.modules.includes(m.key) ? 'on' : ''}" data-module="${m.key}" role="switch" aria-label="${esc(m.title)}"></button></summary>
+        <div class="modbody">
+          ${m.factors.map(f => `<label class="chk"><input type="checkbox" data-factor="${f.key}" ${f.enabled ? 'checked' : ''}>
+            <span>${f.icon} ${esc(f.label)}</span>${f.custom ? `<button class="ghost danger" data-rm-factor="${f.key}" aria-label="Удалить «${esc(f.label)}»">Удалить</button>` : ''}</label>`).join('')}
+          <div class="addf">
+            <input placeholder="Свой фактор, например «Йога»" maxlength="40" data-new-label="${m.key}">
+            <div class="row" style="flex-wrap:nowrap;margin-top:8px">
+              <select data-new-type="${m.key}" style="flex:1;min-width:0">${Object.entries({ bool: 'Да / нет', level: 'Нет … сильно', count: 'Число' }).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
+              <button data-add-factor="${m.key}">Добавить</button>
+            </div>
+          </div>
+        </div>
+      </details>`).join('')}
     </div>
-    <p class="muted">Выключенные разделы не спрашиваются при заполнении.</p>
+    <p class="muted">Переключатель включает раздел целиком. Нажмите на раздел, чтобы убрать отдельные пункты или добавить свои.</p>
 
     <h3>Мои лекарства</h3>
-    <div class="list">${meds.map(m => `
-      <div class="frow"><span class="fic pink">💊</span><div class="fbody"><div class="flabel">${esc(m.name)} ${esc(m.dose)}</div><div class="fval">${L.kinds[m.kind]}${m.active ? '' : ' · скрыто'}</div></div>
-        <button class="ghost" data-med-toggle="${m.id}">${m.active ? 'Скрыть' : 'Вернуть'}</button></div>`).join('') || '<div class="frow muted">Пока пусто</div>'}
+    <div class="list">${meds.filter(m => !m.deleted).map(m => `
+      <div class="frow"><span class="fic">💊</span><div class="fbody"><div class="flabel">${esc(m.name)} ${esc(m.dose)}</div><div class="fval">${L.kinds[m.kind]}</div></div>
+        <button class="ghost danger" data-med-del="${m.id}">Удалить</button></div>`).join('') || '<div class="frow muted">Пока пусто</div>'}
     </div>
     <div class="card" style="margin-top:10px">
       <input id="mName" placeholder="Название, например «Суматриптан»" maxlength="80">
@@ -880,11 +942,12 @@ async function renderSettings() {
       <input type="file" id="restoreFile" accept="application/json,.json" hidden>
     </div>
 
-    <h3>Разбор с Claude</h3>
+    <h3>Анализ дневника с помощью ИИ</h3>
     <div class="card">
-      <p class="muted" style="margin-top:0">Готовит текст с дневником за 30 дней и просьбой его разобрать. Отправьте его в приложение Claude или вставьте в чат.</p>
-      <button class="wide" id="claudeShare">Отправить в Claude…</button>
-      <button class="wide" id="claudeCopy" style="margin-top:8px">Скопировать текст</button>
+      <p class="muted" style="margin-top:0">Готовый запрос с вашими записями и подробной инструкцией для ИИ: итоги, характер приступов, лекарства, провокаторы, прогноз и вопросы к врачу. Вставьте его в любой чат с ИИ — ChatGPT, Claude, Gemini, YandexGPT, GigaChat.</p>
+      <label class="field"><span>За какой период</span>
+        <select id="aiDays">${[30, 90, 180].map(n => `<option value="${n}" ${n === aiDays ? 'selected' : ''}>${n} дней</option>`).join('')}</select></label>
+      <button class="primary wide" id="aiCopy">Скопировать запрос</button>
     </div>
 
     <h3>Данные из «Здоровья»</h3>
@@ -944,11 +1007,42 @@ async function renderSettings() {
       toast('Добавлено'); renderSettings();
     } catch (err) { toast(err.message); }
   };
-  $view.querySelectorAll('[data-med-toggle]').forEach(b => b.onclick = async () => {
-    const m = medById(Number(b.dataset.medToggle));
-    await api.updateMed(m.id, { ...m, active: !m.active });
+  $view.querySelectorAll('[data-med-del]').forEach(b => b.onclick = async () => {
+    const m = medById(Number(b.dataset.medDel));
+    if (!confirm(`Удалить «${m.name}»? В старых записях оно останется.`)) return;
+    await api.deleteMed(m.id);
+    meds = await api.meds();
     renderSettings();
   });
+  // Tapping the switch toggles the module without opening its factor list.
+  $view.querySelectorAll('.mod summary .switch').forEach(b => b.addEventListener('click', e => e.preventDefault()));
+  $view.querySelectorAll('[data-factor]').forEach(c => c.onchange = async () => {
+    await api.setFactorEnabled(c.dataset.factor, c.checked);
+    CFG = await api.config();
+  });
+  $view.querySelectorAll('[data-rm-factor]').forEach(b => b.onclick = async e => {
+    e.preventDefault();
+    if (!confirm('Удалить этот фактор? Уже сделанные записи сохранятся.')) return;
+    await api.removeFactor(b.dataset.rmFactor);
+    renderSettings();
+  });
+  $view.querySelectorAll('[data-add-factor]').forEach(b => b.onclick = async () => {
+    const mod = b.dataset.addFactor;
+    try {
+      await api.addFactor($view.querySelector(`[data-new-label="${mod}"]`).value, $view.querySelector(`[data-new-type="${mod}"]`).value, mod);
+      toast('Добавлено');
+      await renderSettings();
+      $view.querySelector(`[data-add-factor="${mod}"]`).closest('details').open = true;
+    } catch (err) { toast(err.message); }
+  });
+  $('aiDays').onchange = async () => {
+    pref.set('ai_days', $('aiDays').value);
+    const n = Number($('aiDays').value);
+    prompt = await api.aiPrompt(addDays(today(), -(n - 1)), today());
+  };
+  $('aiCopy').onclick = async () => {
+    try { await navigator.clipboard.writeText(prompt); toast('Скопировано — вставьте в чат с ИИ'); } catch { toast('Не удалось скопировать'); }
+  };
   $('backup').onclick = () => saveBackup().catch(err => toast(err.message));
   $('restoreBtn').onclick = () => $('restoreFile').click();
   $('restoreFile').onchange = async e => {
@@ -960,13 +1054,6 @@ async function renderSettings() {
       toast(`Восстановлено дней: ${n}`);
       location.hash = '#diary';
     } catch (err) { toast(err.message); }
-  };
-  $('claudeShare').onclick = async () => {
-    if (!navigator.share) return toast('Отправка недоступна — используйте «Скопировать»');
-    try { await navigator.share({ text: digest }); } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
-  };
-  $('claudeCopy').onclick = async () => {
-    try { await navigator.clipboard.writeText(digest); toast('Скопировано — вставьте в чат с Claude'); } catch { toast('Не удалось скопировать'); }
   };
   const saveHealth = async text => {
     try {
