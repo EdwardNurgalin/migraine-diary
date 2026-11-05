@@ -1,4 +1,6 @@
-'use strict';
+import * as api from './api.js';
+
+const BACKUP_EVERY_MS = 7 * 24 * 3600 * 1000;
 
 // ---------- dictionaries (factors and modules come from /api/config) ----------
 
@@ -45,11 +47,6 @@ const dayWord = s => s === today() ? 'сегодня' : s === addDays(today(), -
 const pct = x => `${Math.round(x * 100)}%`;
 const labelsOf = (dict, keys) => keys.map(k => (Array.isArray(dict[k]) ? dict[k][0] : dict[k]) || k).join(', ');
 
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
-};
-
 let toastTimer;
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -59,20 +56,11 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-async function api(path, opts = {}) {
-  const headers = { 'X-Token': store.get('token') || '', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) };
-  const res = await fetch(path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
-  if (res.status === 401) { renderLogin(); throw new Error('auth'); }
-  if (!res.ok) {
-    let msg = `Ошибка ${res.status}`;
-    try { const j = await res.json(); msg = typeof j.detail === 'string' ? j.detail : msg; } catch { }
-    throw new Error(msg);
-  }
-  return res.headers.get('content-type')?.includes('json') ? res.json() : res;
-}
+// Opened from the Home Screen icon (not a Safari tab). On iPhone these two have separate storage.
+const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
 let CFG = null, meds = [];
-async function loadBase() { [CFG, meds] = await Promise.all([api('/api/config'), api('/api/meds')]); }
+async function loadBase() { [CFG, meds] = await Promise.all([api.config(), api.meds()]); }
 const medById = id => meds.find(m => m.id === id);
 const enabledModules = () => CFG.modules.filter(m => CFG.enabled.includes(m.key));
 function factorDef(k) {
@@ -116,22 +104,12 @@ async function route() {
     if (!CFG) await loadBase();
     await (views[name] || views.diary)();
   } catch (e) {
-    if (e.message !== 'auth') $view.innerHTML = `<div class="card"><h2>Не получилось загрузить</h2><p class="muted">${esc(e.message)}</p><button onclick="route()">Повторить</button></div>`;
+    console.error(e);
+    $view.innerHTML = `<div class="card"><h2>Не получилось загрузить</h2><p class="muted">${esc(e.message)}</p><button onclick="route()">Повторить</button></div>`;
   }
 }
+window.route = route;
 window.addEventListener('hashchange', route);
-
-function renderLogin() {
-  document.body.classList.remove('wizard');
-  $view.innerHTML = `
-    <h1>Дневник</h1>
-    <div class="card">
-      <p>Введите ключ доступа. Он хранится только на этом устройстве.</p>
-      <label class="field"><span>Ключ</span><input id="tok" type="password" autocomplete="current-password"></label>
-      <button class="primary wide" id="tokSave">Войти</button>
-    </div>`;
-  document.getElementById('tokSave').onclick = () => { store.set('token', document.getElementById('tok').value.trim()); CFG = null; route(); };
-}
 
 // ---------- diary home ----------
 
@@ -142,7 +120,9 @@ function dotClass(p, selected) {
 
 async function renderDiary(d) {
   const end = [addDays(d, 3), today()].sort()[0], start = addDays(end, -6);
-  const [day, s] = await Promise.all([api(`/api/day/${d}`), api(`/api/stats?from=${start}&to=${end}`)]);
+  const [day, s, set] = await Promise.all([api.day(d), api.summary(start, end), api.settings()]);
+  const backupDue = s.logged_days > 0 && (!set.last_backup || Date.now() - set.last_backup > BACKUP_EVERY_MS);
+  if (backupDue) await prepareBackup();
   const strip = s.series.map(p => {
     const dt = parseISO(p.date);
     return `<a href="#diary/${p.date}" aria-label="${fmtDate(p.date)}${p.type ? ', ' + L.types[p.type] : ', не заполнен'}">
@@ -151,12 +131,18 @@ async function renderDiary(d) {
 
   $view.innerHTML = `
     <h1>Дневник</h1>
+    ${!standalone() ? `<div class="banner warn"><b>Установите дневник на экран «Домой»</b>
+      <p style="font-size:14px">Safari → «Поделиться» → «На экран „Домой“», и дальше открывайте только иконку. На iPhone у Safari и у иконки разные хранилища: записи, сделанные здесь, в иконке не появятся.</p></div>` : ''}
     <div class="weekstrip">${strip}<a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
     ${day.day ? dayCard(day) : `
       <p class="question">Болела ли голова или были симптомы мигрени ${dayWord(d)}?</p>
       <a class="bigcard teal" href="#log/${d}/no"><span class="ic">${ICON_OK}</span><span>Нет, заполнить факторы</span></a>
       <a class="bigcard pink" href="#log/${d}/yes"><span class="ic">${ICON_PAIN}</span><span>Да, заполнить симптомы и факторы</span></a>`}
-    ${s.overuse.status !== 'ok' ? overuseBanner(s.overuse) : ''}`;
+    ${s.overuse.status !== 'ok' ? overuseBanner(s.overuse) : ''}
+    ${backupDue ? `<div class="banner ok"><b>Пора сделать резервную копию</b>
+      <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
+      <button class="primary" data-backup style="margin-top:6px">Сохранить копию</button></div>` : ''}`;
+  $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
 }
 
 function dayCard(data) {
@@ -193,7 +179,7 @@ function dayCard(data) {
 let wz = null;
 
 async function startWizard(d, headache) {
-  const data = await api(`/api/day/${d}`);
+  const data = await api.day(d);
   const day = data.day;
   const a = data.attacks[0];
   const toDose = x => ({ med_id: x.med_id, time: x.time || '', effect: x.effect });
@@ -361,14 +347,14 @@ async function wizardAction(el) {
     case 'next':
       if (wz.step < wz.steps.length - 1) { wz.step++; drawWizard(); window.scrollTo(0, 0); return; }
       el.disabled = true;
-      await api(`/api/day/${wz.date}`, { method: 'PUT', body: wizardPayload() });
+      await api.saveDay(wz.date, wizardPayload());
       wz.dirty = false;
       toast('Записано ✓');
       location.hash = `#diary/${wz.date}`;
       return;
     case 'delete':
       if (!confirm(`Удалить всю запись за ${fmtDate(wz.date)}?`)) return;
-      await api(`/api/day/${wz.date}`, { method: 'DELETE' });
+      await api.deleteDay(wz.date);
       wz.dirty = false;
       toast('Запись удалена');
       location.hash = `#diary/${wz.date}`;
@@ -404,7 +390,7 @@ $view.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el || !wz) return;
   wizardAction(el).catch(err => {
-    if (err.message !== 'auth') toast(err.message);
+    toast(err.message);
     el.disabled = false;
   });
 });
@@ -426,7 +412,7 @@ window.addEventListener('beforeunload', e => { if (wz?.dirty) e.preventDefault()
 // ---------- calendar ----------
 
 async function renderCalendar(ym) {
-  const data = await api(`/api/month/${ym}`);
+  const data = await api.month(ym);
   const [y, m] = ym.split('-').map(Number);
   const prev = iso(new Date(y, m - 2, 1)).slice(0, 7), next = iso(new Date(y, m, 1)).slice(0, 7);
   const lead = (parseISO(`${ym}-01`).getDay() + 6) % 7;
@@ -527,7 +513,7 @@ function mapCard(title, items, kind, note) {
 
 async function renderData(days) {
   const to = today(), from = addDays(to, -(days - 1));
-  const s = await api(`/api/stats?from=${from}&to=${to}`);
+  const s = await api.summary(from, to);
   const fa = s.factors;
   const triggers = fa.items.filter(x => x.kind === 'trigger');
   const protectors = fa.items.filter(x => x.kind === 'protector');
@@ -585,7 +571,7 @@ async function renderData(days) {
 
 async function renderReport(from, to) {
   to = to || today(); from = from || addDays(to, -89);
-  const s = await api(`/api/stats?from=${from}&to=${to}`);
+  const s = await api.summary(from, to);
   const dur = a => {
     if (!a.start_time || !a.end_time) return '—';
     let m = (Number(a.end_time.slice(0, 2)) * 60 + Number(a.end_time.slice(3))) - (Number(a.start_time.slice(0, 2)) * 60 + Number(a.start_time.slice(3)));
@@ -642,11 +628,45 @@ async function renderReport(from, to) {
   document.getElementById('rt').onchange = go;
 }
 
+// ---------- files: backup, CSV, sharing ----------
+
+// iPhone shows the share sheet ("Сохранить в Файлы", AirDrop, Claude...); elsewhere fall back to a download.
+async function shareFile(name, text, type) {
+  const file = new File([text], name, { type });
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      return true;
+    } catch (e) {
+      if (e.name === 'AbortError') return false;
+      throw e;
+    }
+  }
+  const url = URL.createObjectURL(file);
+  Object.assign(document.createElement('a'), { href: url, download: name }).click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+}
+
+// Safari only allows sharing right after a tap, so the backup is prepared before the button is pressed.
+let preparedBackup = null;
+async function prepareBackup() { preparedBackup = JSON.stringify(await api.backup()); }
+
+async function saveBackup() {
+  if (!preparedBackup) await prepareBackup();
+  if (await shareFile(`дневник-копия-${today()}.json`, preparedBackup, 'application/json')) {
+    await api.markBackedUp();
+    toast('Копия сохранена');
+    route();
+  }
+}
+
 // ---------- settings ----------
 
 async function renderSettings() {
-  const s = await api('/api/settings');
-  meds = await api('/api/meds');
+  const [s, list, digest] = await Promise.all([api.settings(), api.meds(), api.claudeDigest(addDays(today(), -29), today()), prepareBackup()]);
+  meds = list;
+  const csv = await api.csv();
   $view.innerHTML = `
     <h1>Настройки</h1>
     <h3>Разделы дневника</h3>
@@ -679,30 +699,45 @@ async function renderSettings() {
       <div id="cityResults" class="pills" style="margin-top:8px"></div>
     </div>
 
+    <h3>Резервная копия</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">Все записи хранятся только в этом телефоне. ${s.last_backup ? `Последняя копия: ${fmtDateFull(iso(new Date(s.last_backup)))}.` : 'Копий ещё не было.'}</p>
+      <button class="primary wide" id="backup">Сохранить копию в «Файлы»</button>
+      <button class="wide" id="restoreBtn" style="margin-top:8px">Восстановить из копии</button>
+      <input type="file" id="restoreFile" accept="application/json,.json" hidden>
+    </div>
+
+    <h3>Разбор с Claude</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">Готовит текст с дневником за 30 дней и просьбой его разобрать. Отправьте его в приложение Claude или вставьте в чат.</p>
+      <button class="wide" id="claudeShare">Отправить в Claude…</button>
+      <button class="wide" id="claudeCopy" style="margin-top:8px">Скопировать текст</button>
+    </div>
+
+    <h3>Данные из «Здоровья»</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">Команда на iPhone копирует сон, пульс и ВСР, а здесь вы их вставляете. Как сделать команду — в инструкции на GitHub.</p>
+      <button class="wide" id="healthPaste">Вставить данные из «Здоровья»</button>
+      <textarea id="healthText" placeholder="Или вставьте текст сюда вручную" style="min-height:70px;margin-top:8px"></textarea>
+      <button class="wide" id="healthSave" style="margin-top:8px">Сохранить</button>
+    </div>
+
     <h3>Напоминание</h3>
     <div class="card">
-      <label class="field" style="margin-top:0"><span>Во сколько спрашивать «Как прошёл день?»</span><input type="time" id="rem" value="${esc(s.reminder_time)}"></label>
-      <p class="muted">Уведомления заработают, когда приложение будет на сервере с HTTPS.</p>
+      <p style="margin-top:0">Без сервера дневник не может сам присылать уведомления. Проще всего:</p>
+      <p>«Напоминания» → новое напоминание «Заполнить дневник» → дата и время 21:00 → повтор «Ежедневно».</p>
     </div>
 
-    <h3>Данные</h3>
+    <h3>Экспорт</h3>
     <div class="card">
-      <button id="exportCsv" class="wide">Скачать всё в CSV</button>
-      <label class="field"><span>Ключ доступа</span>
-        <div class="row" style="flex-wrap:nowrap"><input type="password" id="tok" value="${esc(store.get('token') || '')}" style="flex:1;min-width:0" autocomplete="off"><button id="tokSave">Сохранить</button></div></label>
-    </div>
-
-    <h3>Установить на телефон</h3>
-    <div class="card">
-      <p style="margin-top:0"><b>iPhone:</b> Safari → «Поделиться» → «На экран „Домой“».</p>
-      <p><b>Android:</b> Chrome → ⋮ → «Установить приложение».</p>
+      <button id="exportCsv" class="wide">Скачать всё в CSV (Excel)</button>
     </div>`;
 
   const $ = id => document.getElementById(id);
   $view.querySelectorAll('[data-module]').forEach(b => b.onclick = async () => {
     const key = b.dataset.module;
     const next = s.modules.includes(key) ? s.modules.filter(k => k !== key) : [...s.modules, key];
-    await api('/api/settings', { method: 'PUT', body: { modules: next } });
+    await api.saveSettings({ modules: next });
     s.modules = next;
     CFG.enabled = CFG.modules.map(m => m.key).filter(k => next.includes(k));
     b.classList.toggle('on');
@@ -711,44 +746,66 @@ async function renderSettings() {
     const q = $('cityQ').value.trim();
     if (q.length < 2) return;
     try {
-      const list = await api(`/api/geocode?q=${encodeURIComponent(q)}`);
-      $('cityResults').innerHTML = list.length ? list.map((c, i) => `<button class="pill" data-city="${i}">${esc(c.name)}, ${esc(c.region)}</button>`).join('') : '<p class="muted">Ничего не нашлось</p>';
+      const found = await api.geocode(q);
+      $('cityResults').innerHTML = found.length ? found.map((c, i) => `<button class="pill" data-city="${i}">${esc(c.name)}, ${esc(c.region)}</button>`).join('') : '<p class="muted">Ничего не нашлось</p>';
       $('cityResults').onclick = async e => {
         const b = e.target.closest('[data-city]');
         if (!b) return;
-        await api('/api/settings', { method: 'PUT', body: { city: list[Number(b.dataset.city)] } });
+        await api.saveSettings({ city: found[Number(b.dataset.city)] });
         toast('Город сохранён, погода загружена');
         renderSettings();
       };
-    } catch (err) { toast(err.message); }
+    } catch (err) { toast(navigator.onLine ? err.message : 'Нужен интернет'); }
   };
   $('cityQ').onkeydown = e => { if (e.key === 'Enter') $('citySearch').click(); };
   $('mAdd').onclick = async () => {
-    const name = $('mName').value.trim();
-    if (!name) return toast('Введите название');
     try {
-      await api('/api/meds', { method: 'POST', body: { name, dose: $('mDose').value.trim(), kind: $('mKind').value } });
+      await api.addMed({ name: $('mName').value, dose: $('mDose').value, kind: $('mKind').value });
+      meds = await api.meds();
       toast('Добавлено'); renderSettings();
     } catch (err) { toast(err.message); }
   };
   $view.querySelectorAll('[data-med-toggle]').forEach(b => b.onclick = async () => {
     const m = medById(Number(b.dataset.medToggle));
-    await api(`/api/meds/${m.id}`, { method: 'PUT', body: { ...m, active: !m.active } });
+    await api.updateMed(m.id, { ...m, active: !m.active });
     renderSettings();
   });
-  $('rem').onchange = async () => { await api('/api/settings', { method: 'PUT', body: { reminder_time: $('rem').value } }); toast('Сохранено'); };
-  $('tokSave').onclick = () => { store.set('token', $('tok').value.trim()); toast('Ключ сохранён'); };
-  $('exportCsv').onclick = async () => {
+  $('backup').onclick = () => saveBackup().catch(err => toast(err.message));
+  $('restoreBtn').onclick = () => $('restoreFile').click();
+  $('restoreFile').onchange = async e => {
+    const file = e.target.files[0];
+    if (!file || !confirm('Заменить все записи на этом телефоне данными из копии?')) return;
     try {
-      const res = await api('/api/export.csv');
-      const url = URL.createObjectURL(await res.blob());
-      const a = Object.assign(document.createElement('a'), { href: url, download: `headache-diary-${today()}.csv` });
-      a.click(); URL.revokeObjectURL(url);
-    } catch (err) { if (err.message !== 'auth') toast(err.message); }
+      const n = await api.restore(await file.text());
+      CFG = null;
+      toast(`Восстановлено дней: ${n}`);
+      location.hash = '#diary';
+    } catch (err) { toast(err.message); }
   };
+  $('claudeShare').onclick = async () => {
+    if (!navigator.share) return toast('Отправка недоступна — используйте «Скопировать»');
+    try { await navigator.share({ text: digest }); } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
+  };
+  $('claudeCopy').onclick = async () => {
+    try { await navigator.clipboard.writeText(digest); toast('Скопировано — вставьте в чат с Claude'); } catch { toast('Не удалось скопировать'); }
+  };
+  const saveHealth = async text => {
+    try {
+      const row = await api.importHealth(text);
+      toast(`Сохранено за ${fmtDate(row.date)}`);
+      $('healthText').value = '';
+    } catch (err) { toast(err.message); }
+  };
+  $('healthPaste').onclick = async () => {
+    try { await saveHealth(await navigator.clipboard.readText()); } catch { toast('Не получилось прочитать буфер — вставьте текст в поле'); }
+  };
+  $('healthSave').onclick = () => saveHealth($('healthText').value);
+  $('exportCsv').onclick = () => shareFile(`дневник-${today()}.csv`, csv, 'text/csv').catch(err => toast(err.message));
 }
 
 // ---------- boot ----------
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
+// Ask the browser not to evict the diary's storage when space runs low.
+navigator.storage?.persist?.().catch(() => { });
 route();

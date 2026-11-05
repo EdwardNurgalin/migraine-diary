@@ -7,7 +7,7 @@ from pathlib import Path
 
 TEAL = (42, 140, 130)
 WHITE = (255, 255, 255)
-OUT = Path(__file__).resolve().parent.parent / "app" / "static" / "icons"
+OUT = Path(__file__).resolve().parent.parent / "docs" / "icons"
 
 # Pulse line across the page, in unit coordinates.
 PULSE = [(0.30, 0.56), (0.42, 0.56), (0.48, 0.42), (0.55, 0.70), (0.61, 0.50), (0.66, 0.56), (0.72, 0.56)]
