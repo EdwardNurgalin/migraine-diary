@@ -71,6 +71,48 @@ export function overuse(days, medsById, end) {
 
 export const allDoses = day => [...day.attacks.flatMap(a => a.doses), ...day.doses];
 
+const daysBetween = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000);
+
+/**
+ * Menstrual cycle from the days marked "менструация": period starts, average cycle and period length,
+ * and a forecast of the next period. The forecast needs at least one full cycle of plausible length.
+ */
+export function cycle(days) {
+  const marked = days.filter(d => d.period).map(d => d.date).sort();
+  const periods = [];
+  for (const date of marked) {
+    const last = periods.at(-1);
+    // A gap of a day or two inside one period (a forgotten mark) still counts as the same period.
+    if (last && daysBetween(last.end, date) <= 3) last.end = date;
+    else periods.push({ start: date, end: date });
+  }
+  const lengths = [];
+  for (let i = 1; i < periods.length; i++) {
+    const len = daysBetween(periods[i - 1].start, periods[i].start);
+    if (len >= 20 && len <= 45) lengths.push(len);
+  }
+  const avg = xs => xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : null;
+  const cycleLen = avg(lengths);
+  const periodLen = avg(periods.map(p => daysBetween(p.start, p.end) + 1));
+  let forecast = [];
+  if (cycleLen && periods.length) {
+    let start = addDays(periods.at(-1).start, cycleLen);
+    // If the predicted start has already passed without a mark, move on to the next cycle.
+    while (start < addDays(today(), -periodLen)) start = addDays(start, cycleLen);
+    forecast = Array.from({ length: periodLen }, (_, i) => addDays(start, i));
+  }
+  return {
+    periods, cycleLen, periodLen, forecast,
+    /** Day of the cycle (1 = first day of period) or null if unknown. */
+    dayOf(date) {
+      const p = periods.filter(x => x.start <= date).at(-1);
+      if (!p) return null;
+      const n = daysBetween(p.start, date) + 1;
+      return n <= (cycleLen || 45) + 10 ? n : null;
+    },
+  };
+}
+
 /**
  * @param days     day records in [from, to] (for overuse, the caller also passes the 30 days before `to`)
  * @param weather  {date: row}

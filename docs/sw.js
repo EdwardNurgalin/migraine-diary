@@ -1,6 +1,6 @@
 // Keeps the whole app on the phone so it opens instantly and works without internet.
 // Bump VERSION on every release so phones pick up the new files.
-const VERSION = 'diary-v3';
+const VERSION = 'diary-v4';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './api.js', './config.js', './stats.js', './store.js', './weather.js',
   './manifest.webmanifest', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
@@ -20,9 +20,10 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   // Weather and geocoding go straight to the network.
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  // Network first so a new release shows up right away; the cached copy when offline.
+  // Network first so a new release shows up right away (no-cache: revalidate, don't trust the HTTP cache);
+  // the cached copy when offline.
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })
       .then(res => {
         if (res.ok) {
           const copy = res.clone();

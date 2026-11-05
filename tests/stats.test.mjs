@@ -1,7 +1,7 @@
 // Run: node --test tests/*.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addDays, isMigraine, overuse, summary } from '../docs/stats.js';
+import { addDays, cycle, isMigraine, overuse, summary, today } from '../docs/stats.js';
 
 const attack = over => ({ start_time: '10:00', end_time: '14:00', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [], ...over });
 
@@ -71,4 +71,25 @@ test('factors: hidden until 30 days are logged', () => {
   const days = Array.from({ length: 10 }, (_, i) => day(addDays(from, i)));
   const s = summary({ from, to, days, weather: {}, health: {}, meds });
   assert.deepEqual([s.factors.ready, s.factors.have], [false, 10]);
+});
+
+test('cycle: 28-day cycle gives cycle day and a forecast after the last period', () => {
+  const start = addDays(today(), -60);
+  const days = [];
+  for (const offset of [0, 28, 56]) for (let i = 0; i < 5; i++) days.push(day(addDays(start, offset + i), { period: true }));
+  const c = cycle(days);
+  assert.equal(c.periods.length, 3);
+  assert.equal(c.cycleLen, 28);
+  assert.equal(c.periodLen, 5);
+  assert.equal(c.forecast[0], addDays(start, 84));
+  assert.equal(c.forecast.length, 5);
+  assert.equal(c.dayOf(addDays(start, 30)), 3);
+});
+
+test('cycle: a forgotten mark inside a period does not split it; no forecast from one period', () => {
+  const s = '2026-10-01';
+  const days = [0, 1, 3, 4].map(i => day(addDays(s, i), { period: true }));
+  const c = cycle(days);
+  assert.equal(c.periods.length, 1);
+  assert.deepEqual(c.forecast, []);
 });

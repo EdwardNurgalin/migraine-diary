@@ -25,12 +25,6 @@ const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', '�
 const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const DOW = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
-// Head-profile icon in the spirit of N1: a check for pain-free days, rings for pain.
-const HEAD = '<path fill="var(--head)" d="M27 5C16.5 5 9 12.6 9 22.4c0 5.6 2.4 9.6 5.4 12.6V45h17v-5.5h4.3c2.3 0 3.9-1.7 3.9-3.9v-5.2l3.6-1.3c.8-.3 1.1-1.2.7-1.9l-3.9-6.6C40 11.6 34.4 5 27 5z"/>';
-const ICON_OK = `<svg viewBox="0 0 48 48">${HEAD}<path d="M18 21.5l5 5 9-10" fill="none" stroke="var(--teal)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-const ICON_PAIN = `<svg viewBox="0 0 48 48">${HEAD}<g fill="none" stroke="var(--pink)" stroke-width="2.4"><circle cx="25" cy="20" r="3"/><circle cx="25" cy="20" r="7"/><circle cx="25" cy="20" r="11"/></g></svg>`;
-const ICON_MIGRAINE = ICON_PAIN.replaceAll('var(--pink)', '#e6d4f7');
-
 // ---------- helpers ----------
 
 const $view = document.getElementById('view');
@@ -82,19 +76,23 @@ function setPath(obj, path, val) {
 
 // ---------- router ----------
 
-const TAB_OF = { diary: 'diary', log: 'diary', calendar: 'calendar', data: 'data', report: 'data', settings: 'settings' };
+const TAB_OF = { diary: 'diary', log: 'diary', attack: 'diary', calendar: 'calendar', data: 'data', report: 'data', settings: 'settings' };
 
 async function route() {
   let [name, a, b] = (location.hash.slice(1) || 'diary').split('/');
   if (name === 'today' || name === 'day') name = 'diary';
   wz = null;
+  if (name !== 'attack') attackState = null;
   document.body.classList.toggle('wizard', name === 'log');
+  document.body.classList.toggle('attack', name === 'attack');
+  applyDim(name === 'attack' ? 0.2 : 0);
   document.querySelectorAll('.tabs a').forEach(el => el.classList.toggle('on', el.dataset.tab === TAB_OF[name]));
   window.scrollTo(0, 0);
   const valid = d => d && /^\d{4}-\d\d-\d\d$/.test(d) && d <= today() ? d : today();
   const views = {
     diary: () => renderDiary(valid(a)),
     log: () => startWizard(valid(a), b === 'yes'),
+    attack: async () => renderAttack(),
     calendar: () => renderCalendar(a || today().slice(0, 7)),
     data: () => renderData(Number(a) || 30),
     report: () => renderReport(a, b),
@@ -111,11 +109,43 @@ async function route() {
 window.route = route;
 window.addEventListener('hashchange', route);
 
+// ---------- theme & brightness ----------
+
+const THEMES = {
+  moss: { name: 'Мох', bar: '#171c1a', sw: ['#171c1a', '#7fa88f', '#c3916f', '#94738a'] },
+  dusk: { name: 'Сумерки', bar: '#1d1a17', sw: ['#1d1a17', '#8fa88f', '#cf9a7c', '#a08bb8'] },
+  paper: { name: 'Бумага', bar: '#ebe6dc', sw: ['#ebe6dc', '#8fb8a0', '#d4a07c', '#a693c4'] },
+};
+// UI preferences live in localStorage: they only matter on this device and are safe to lose.
+const pref = {
+  get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+};
+function applyTheme(t) {
+  if (!THEMES[t]) t = 'moss';
+  document.documentElement.dataset.theme = t;
+  document.querySelector('meta[name=theme-color]').content = THEMES[t].bar;
+}
+// `dim` is 0 (normal) to 0.5 (much darker); attack mode adds a little on top.
+function applyDim(extra = 0) {
+  document.getElementById('dim').style.opacity = String(Math.min(Number(pref.get('dim', 0)) + extra, 0.7));
+}
+
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+const TYPE_COLOR = { none: 'var(--none)', headache: 'var(--ha)', migraine: 'var(--mi)' };
+
 // ---------- diary home ----------
 
-function dotClass(p, selected) {
-  const t = p.type ? `t-${p.type}` : 'empty';
-  return `dot ${t} ${p.date === selected ? 'sel' : ''}`;
+// Minimal marks: only pain days are filled; pain-free days are plain numbers, unfilled days are faint.
+function numClass(p, selected) {
+  const cls = ['num'];
+  if (p.type === 'headache' || p.type === 'migraine') cls.push(`t-${p.type}`);
+  else if (!p.logged) cls.push('unlogged');
+  if (p.date === selected) cls.push('sel');
+  return cls.join(' ');
 }
 
 async function renderDiary(d) {
@@ -126,7 +156,7 @@ async function renderDiary(d) {
   const strip = s.series.map(p => {
     const dt = parseISO(p.date);
     return `<a href="#diary/${p.date}" aria-label="${fmtDate(p.date)}${p.type ? ', ' + L.types[p.type] : ', не заполнен'}">
-      <span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span><span class="${dotClass(p, d)}">${dt.getDate()}</span></a>`;
+      <span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span><span class="${numClass(p, d)}">${dt.getDate()}${p.meds ? '<i class="medmark"></i>' : ''}</span></a>`;
   }).join('');
 
   $view.innerHTML = `
@@ -135,9 +165,10 @@ async function renderDiary(d) {
       <p style="font-size:14px">Safari → «Поделиться» → «На экран „Домой“», и дальше открывайте только иконку. На iPhone у Safari и у иконки разные хранилища: записи, сделанные здесь, в иконке не появятся.</p></div>` : ''}
     <div class="weekstrip">${strip}<a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
     ${day.day ? dayCard(day) : `
-      <p class="question">Болела ли голова или были симптомы мигрени ${dayWord(d)}?</p>
-      <a class="bigcard teal" href="#log/${d}/no"><span class="ic">${ICON_OK}</span><span>Нет, заполнить факторы</span></a>
-      <a class="bigcard pink" href="#log/${d}/yes"><span class="ic">${ICON_PAIN}</span><span>Да, заполнить симптомы и факторы</span></a>`}
+      <p class="question">Болела ли голова ${dayWord(d)}?</p>
+      <a class="choice no" href="#log/${d}/no"><span class="ic">✓</span><span>Нет, всё спокойно<small>Отметить, как прошёл день</small></span></a>
+      <a class="choice yes" href="#log/${d}/yes"><span class="ic">∿</span><span>Да, болела<small>Приступ, лекарства и факторы</small></span></a>`}
+    ${d === today() ? '<a class="attackbtn" href="#attack">☾ Болит сейчас — записать в два касания</a>' : ''}
     ${s.overuse.status !== 'ok' ? overuseBanner(s.overuse) : ''}
     ${backupDue ? `<div class="banner ok"><b>Пора сделать резервную копию</b>
       <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
@@ -145,10 +176,11 @@ async function renderDiary(d) {
   $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
 }
 
+const dayType = data => !data.day.headache ? 'none' : data.attacks.some(x => x.migraine) ? 'migraine' : 'headache';
+const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; };
+
 function dayCard(data) {
-  const day = data.day, a = data.attacks[0];
-  const type = !day.headache ? 'none' : data.attacks.some(x => x.migraine) ? 'migraine' : 'headache';
-  const icon = type === 'none' ? ICON_OK : type === 'migraine' ? ICON_MIGRAINE : ICON_PAIN;
+  const day = data.day, a = data.attacks[0], type = dayType(data);
   const exposed = Object.entries(day.factors).map(([k, v]) => [factorDef(k), v]).filter(([f, v]) => f.type && isExposed(f, v));
   const allDoses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
   const w = data.weather;
@@ -159,18 +191,18 @@ function dayCard(data) {
     if (a.location.length || a.character.length) rows.push(['Боль', esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character)].filter(Boolean).join('; '))]);
     if (a.symptoms.length) rows.push(['Симптомы', esc(labelsOf(L.symptoms, a.symptoms))]);
   }
-  if (allDoses.length) rows.push(['Лекарства', allDoses.map(x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; }).join('<br>')]);
+  if (allDoses.length) rows.push(['Лекарства', allDoses.map(doseText).join('<br>')]);
   if (day.sleep_hours != null) rows.push(['Сон', `${day.sleep_hours} ч`]);
   if (day.period) rows.push(['Цикл', 'Менструация']);
   if (exposed.length) rows.push(['Факторы', `<div class="tags">${exposed.map(([f, v]) => `<span class="tag">${f.icon} ${esc(f.label)}${f.type !== 'bool' ? ': ' + factorValueText(f, v).toLowerCase() : ''}</span>`).join('')}</div>`]);
   if (w) rows.push(['Погода', `${w.pressure ?? '—'} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta})` : ''}, ${w.temp ?? '—'}°C`]);
   if (day.note) rows.push(['Заметка', esc(day.note)]);
   return `
-    <div class="daycard t-${type}">
-      <div class="dc-head"><span class="ic">${icon}</span><div><b>${L.types[type]}</b><span>${fmtDateFull(data.date)}</span></div></div>
-      <div class="dc-body">${rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('')}</div>
+    <div class="daycard">
+      <div class="dc-head"><i style="background:${TYPE_COLOR[type]}"></i><b>${L.types[type]}</b><span>${fmtDate(data.date)}</span></div>
+      ${rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('')}
     </div>
-    <a class="btn primary wide" href="#log/${data.date}/${day.headache ? 'yes' : 'no'}">Изменить запись</a>
+    <a class="btn wide" href="#log/${data.date}/${day.headache ? 'yes' : 'no'}">Изменить запись</a>
     ${type === 'migraine' ? '<p class="muted center" style="margin-top:12px">«Похоже на мигрень» — по признакам приступа (ICHD-3). Диагноз ставит врач.</p>' : ''}`;
 }
 
@@ -299,7 +331,7 @@ function drawWizard() {
   $view.innerHTML = `
     <div class="wiz-top">
       <button class="x" data-act="close" aria-label="Закрыть">✕</button>
-      <div class="progress">${wz.steps.map((_, i) => `<i class="${i <= wz.step ? 'on' : ''}"></i>`).join('')}</div>
+      <div class="progress" role="progressbar" aria-valuenow="${wz.step + 1}" aria-valuemax="${wz.steps.length}"><i style="width:${(wz.step + 1) / wz.steps.length * 100}%"></i></div>
       <span class="muted">${wz.step + 1}/${wz.steps.length}</span>
     </div>
     ${stepBody(st)}
@@ -411,40 +443,177 @@ window.addEventListener('beforeunload', e => { if (wz?.dirty) e.preventDefault()
 
 // ---------- calendar ----------
 
+const calPrefs = () => ({
+  meds: pref.get('cal_meds', '1') === '1',
+  cycle: pref.get('cal_cycle', '1') === '1',
+  view: pref.get('cal_view', 'month'),
+});
+
+// The one medication limit closest to being reached, as a short phrase for the summary line.
+function overuseText(o) {
+  const labels = { specific: 'триптаны', simple: 'обезболивающие', any: 'все обезболивающие' };
+  const key = Object.keys(labels).sort((a, b) => o[b].days / o[b].limit - o[a].days / o[a].limit)[0];
+  const x = o[key];
+  if (!x.days) return 'без обезболивающих';
+  return `${labels[key]} <b class="${x.status}">${x.days} из ${x.limit}</b> дн.`;
+}
+
 async function renderCalendar(ym) {
-  const data = await api.month(ym);
+  const [data, cyc] = await Promise.all([api.month(ym), api.cycle()]);
+  const pr = calPrefs();
   const [y, m] = ym.split('-').map(Number);
   const prev = iso(new Date(y, m - 2, 1)).slice(0, 7), next = iso(new Date(y, m, 1)).slice(0, 7);
+  const t = today();
+  const n = data.headache_days;
+  $view.innerHTML = `
+    <div class="monthbar"><h1>${MONTHS[m - 1]}${y !== new Date().getFullYear() ? ' ' + y : ''}</h1>
+      <div class="nav"><button data-go="${prev}" aria-label="Предыдущий месяц">‹</button><button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div></div>
+    <p class="sumline"><b>${n}</b> ${plural(n, 'день', 'дня', 'дней')} боли · <b>${data.migraine_days}</b> похоже на мигрень · ${overuseText(data.overuse)}</p>
+    <div class="seg" style="margin-bottom:16px">
+      <button data-view="month" class="${pr.view === 'month' ? 'on' : ''}">Месяц</button>
+      <button data-view="tracks" class="${pr.view === 'tracks' ? 'on' : ''}">Дорожки</button>
+    </div>
+    ${pr.view === 'tracks' ? tracksView(data, cyc) : monthGrid(data, cyc, pr, ym)}`;
+
+  $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
+  $view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { pref.set('cal_view', b.dataset.view); renderCalendar(ym); });
+  $view.querySelectorAll('[data-cal-toggle]').forEach(b => b.onclick = () => {
+    const k = b.dataset.calToggle;
+    pref.set(k, pref.get(k, '1') === '1' ? '0' : '1');
+    renderCalendar(ym);
+  });
+  $view.querySelectorAll('[data-day]').forEach(b => b.onclick = () => showPeek(b.dataset.day, cyc).catch(err => toast(err.message)));
+}
+
+function monthGrid(data, cyc, pr, ym) {
   const lead = (parseISO(`${ym}-01`).getDay() + 6) % 7;
   const t = today();
-  const cells = data.series.map(p => `
-    <a href="#diary/${p.date}" class="${p.date > t ? 'future' : ''}" aria-label="${fmtDate(p.date)}, ${p.type ? L.types[p.type] : 'не заполнен'}">
-      <span class="${dotClass(p, t)}">${Number(p.date.slice(8))}</span>
-      ${p.meds ? '<span class="pillmark">💊</span>' : ''}${p.period ? '<span class="permark"></span>' : ''}
-    </a>`).join('');
-  const missed = data.series.filter(p => p.date <= t && !p.logged).length;
-  $view.innerHTML = `
-    <h1>Календарь</h1>
-    <div class="card">
-      <div class="monthbar">
-        <button onclick="location.hash='#calendar/${prev}'" aria-label="Предыдущий месяц">‹</button>
-        <h2>${MONTHS[m - 1]} ${y}</h2>
-        <button onclick="location.hash='#calendar/${next}'" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button>
-      </div>
-      <div class="cal">${DOW.map(d => `<div class="dow">${d}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>
-      <div class="legend">
-        <span><i style="background:var(--teal)"></i>без боли</span><span><i style="background:var(--pink)"></i>головная боль</span>
-        <span><i style="background:var(--migraine)"></i>похоже на мигрень</span><span>💊 лекарства</span>
-        <span><i style="background:#ff6b8a"></i>менструация</span>
-      </div>
+  const fc = new Set(cyc.forecast);
+  const cells = data.series.map(p => {
+    const future = p.date > t;
+    const cls = future ? 'num future' : numClass(p, t).replace(' sel', ' today');
+    const med = pr.meds && p.meds ? '<i class="medmark"></i>' : '';
+    const per = !pr.cycle ? '' : p.period ? '<i class="perline"></i>' : fc.has(p.date) && !p.logged ? '<i class="perline fc"></i>' : '';
+    return `<button class="cd" data-day="${p.date}" ${future ? 'disabled' : ''} aria-label="${fmtDate(p.date)}, ${p.type ? L.types[p.type] : 'не заполнен'}${p.meds ? ', лекарства' : ''}${p.period ? ', менструация' : ''}">
+      <span class="${cls}">${Number(p.date.slice(8))}${med}</span>${per}</button>`;
+  }).join('');
+  const next = cyc.forecast[0];
+  return `
+    <div class="cal">${DOW.map(d => `<div class="dow">${d.toLowerCase()}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>
+    <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span></div>
+    <div class="toggles">
+      <button data-cal-toggle="cal_meds" class="${pr.meds ? 'on' : ''}" aria-pressed="${pr.meds}"><i style="background:var(--med)"></i>Лекарства</button>
+      <button data-cal-toggle="cal_cycle" class="${pr.cycle ? 'on' : ''}" aria-pressed="${pr.cycle}"><i style="background:var(--per)"></i>Цикл</button>
     </div>
-    <div class="card">
-      <div class="stat"><i style="background:var(--teal)"></i>Дней без боли: <b>${data.pain_free_days}</b></div>
-      <div class="stat"><i style="background:var(--pink)"></i>Дней с головной болью: <b>${data.headache_days - data.migraine_days}</b></div>
-      <div class="stat"><i style="background:var(--migraine)"></i>Похоже на мигрень: <b>${data.migraine_days}</b></div>
-      <div class="stat"><i style="background:var(--line)"></i>Не заполнено: <b>${missed}</b></div>
-    </div>`;
+    <div id="peek"></div>
+    ${pr.cycle && next && next >= t ? `<p class="muted" style="margin-top:12px">Следующая менструация ожидается около ${fmtDate(next)} (бледная линия).</p>` : ''}`;
 }
+
+async function showPeek(date, cyc) {
+  const data = await api.day(date);
+  $view.querySelectorAll('.cd .num').forEach(el => el.classList.toggle('sel', el.closest('[data-day]').dataset.day === date));
+  const cd = cyc.dayOf(date);
+  const el = document.getElementById('peek');
+  if (!data.day) {
+    el.innerHTML = `<div class="peek"><div class="spread"><b>${fmtDate(date)}</b><a href="#diary/${date}">Заполнить</a></div>
+      <p>Нет записи${cd ? ` · ${cd}-й день цикла` : ''}</p></div>`;
+    return;
+  }
+  const type = dayType(data), a = data.attacks[0];
+  const doses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
+  const parts = [
+    a && `сила ${a.intensity}`,
+    a?.start_time && `${a.start_time}${a.end_time ? '–' + a.end_time : ''}`,
+    doses.length && doses.map(doseText).join(', '),
+    data.day.period ? 'менструация' : cd && `${cd}-й день цикла`,
+    data.day.sleep_hours != null && `сон ${data.day.sleep_hours} ч`,
+  ].filter(Boolean);
+  el.innerHTML = `<div class="peek">
+    <div class="spread"><b>${fmtDate(date)}</b><span style="color:${TYPE_COLOR[type]}">${L.types[type].toLowerCase()}</span></div>
+    ${parts.length ? `<p>${parts.join(' · ')}</p>` : ''}
+    <a href="#diary/${date}">Открыть день</a></div>`;
+}
+
+// Same month as rows: pain, medication, cycle, pressure. Shows what coincides with what.
+function tracksView(data, cyc) {
+  const s = data.series, n = s.length, W = 300, cw = W / n, t = today();
+  // Only pain bars: a row of tiny marks for the other days would read as a dotted line (pattern glare).
+  const pain = s.map((p, i) => p.headache
+    ? `<rect x="${i * cw + 0.6}" y="${40 - p.intensity * 4}" width="${cw - 1.2}" height="${p.intensity * 4}" rx="1.5" fill="${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"/>`
+    : '').join('');
+  const medsRow = s.map((p, i) => p.meds ? `<circle cx="${i * cw + cw / 2}" cy="5" r="3" fill="var(--med)"/>` : '').join('');
+  const fc = new Set(cyc.forecast);
+  const runs = (test) => {
+    const out = [];
+    s.forEach((p, i) => { if (test(p)) { const last = out.at(-1); if (last && last[1] === i - 1) last[1] = i; else out.push([i, i]); } });
+    return out;
+  };
+  const cycleRow = runs(p => p.period).map(([a, b]) => `<rect x="${a * cw + 1}" y="2" width="${(b - a + 1) * cw - 2}" height="6" rx="3" fill="var(--per)"/>`).join('')
+    + runs(p => !p.logged && fc.has(p.date)).map(([a, b]) => `<rect x="${a * cw + 1}" y="2" width="${(b - a + 1) * cw - 2}" height="6" rx="3" fill="var(--per)" opacity=".35"/>`).join('');
+  const ps = s.map(p => p.pressure).filter(v => v != null);
+  const pmin = Math.min(...ps), pr = Math.max(Math.max(...ps) - pmin, 1);
+  const pts = s.map((p, i) => p.pressure == null || p.date > t ? null : `${i * cw + cw / 2},${26 - (p.pressure - pmin) / pr * 22}`).filter(Boolean).join(' ');
+  const axis = [1, 10, 20, n].map(d => `<text x="${Math.min((d - 1) * cw + cw / 2, W - 6)}" y="10" font-size="9" text-anchor="middle" fill="var(--faint)">${d}</text>`).join('');
+
+  const painDays = s.filter(p => p.headache);
+  const withPeriod = painDays.filter(p => p.period).length;
+  const withJump = painDays.filter(p => Math.abs(p.pressure_delta ?? 0) >= 5
+    || Math.abs(s[s.indexOf(p) - 1]?.pressure_delta ?? 0) >= 5).length;
+  const insight = !painDays.length ? 'В этом месяце дней с болью нет.'
+    : `Из ${painDays.length} ${plural(painDays.length, 'дня', 'дней', 'дней')} с болью: ${withPeriod} — во время менструации, ${withJump} — при резкой смене давления (±5 гПа за сутки, в тот же или предыдущий день).`;
+
+  return `<div class="tracks">
+      <div class="tr"><span>Боль</span><svg viewBox="0 0 ${W} 40" role="img" aria-label="Сила боли по дням">${pain}</svg></div>
+      <div class="tr"><span>Лекарства</span><svg viewBox="0 0 ${W} 10" role="img" aria-label="Дни с лекарствами">${medsRow}</svg></div>
+      <div class="tr"><span>Цикл</span><svg viewBox="0 0 ${W} 10" role="img" aria-label="Менструация">${cycleRow}</svg></div>
+      <div class="tr"><span>Давление</span>${ps.length > 1 ? `<svg viewBox="0 0 ${W} 28" role="img" aria-label="Атмосферное давление"><polyline points="${pts}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linejoin="round"/></svg>` : '<span>укажите город в настройках</span>'}</div>
+      <div class="tr"><span></span><svg viewBox="0 0 ${W} 12">${axis}</svg></div>
+    </div>
+    <p class="insight">${insight}</p>`;
+}
+
+// ---------- attack mode ----------
+
+const ATTACK_LEVELS = [[4, 'Терпимо', 'можно заниматься делами'], [7, 'Сильно', 'трудно что-то делать'], [9, 'Невыносимо', 'нужно лечь']];
+let attackState = null;
+
+function renderAttack() {
+  attackState ??= { level: null, meds: new Set() };
+  const acute = meds.filter(m => m.active && m.kind !== 'preventive');
+  $view.innerHTML = `
+    <div class="wiz-top"><button class="x" data-attack="close" aria-label="Закрыть">✕</button></div>
+    <div class="attack-head"><b>Болит сейчас</b><span>Подробности можно дописать потом</span></div>
+    ${ATTACK_LEVELS.map(([v, t, s]) => `<button class="bigopt ${attackState.level === v ? 'on' : ''}" data-level="${v}">${t}<small>${s}</small></button>`).join('')}
+    ${acute.length ? `<h3>Что приняли</h3><div class="pills">${acute.map(m => `<button class="pill ${attackState.meds.has(m.id) ? 'on' : ''}" data-med="${m.id}">${esc(m.name)} ${esc(m.dose)}</button>`).join('')}</div>` : ''}
+    <button class="primary wide" data-attack="save" style="margin-top:24px;padding:16px;font-size:18px">Записать</button>`;
+}
+
+async function attackAction(el) {
+  if (el.dataset.level) attackState.level = Number(el.dataset.level);
+  else if (el.dataset.med) {
+    const id = Number(el.dataset.med);
+    attackState.meds.has(id) ? attackState.meds.delete(id) : attackState.meds.add(id);
+  } else if (el.dataset.attack === 'close') {
+    location.hash = '#diary';
+    return;
+  } else if (el.dataset.attack === 'save') {
+    if (!attackState.level) return toast('Выберите, насколько сильно болит');
+    await api.quickAttack(attackState.level, [...attackState.meds]);
+    attackState = null;
+    $view.innerHTML = `
+      <div class="attack-head" style="margin-top:70px"><b>Записано</b><span>Отдохните. Когда станет легче, можно дописать симптомы и факторы.</span></div>
+      <a class="btn wide" href="#log/${today()}/yes">Дописать подробности</a>
+      <a class="btn wide" style="margin-top:10px;background:transparent;color:var(--muted)" href="#diary">Закрыть</a>`;
+    return;
+  } else return;
+  renderAttack();
+}
+
+$view.addEventListener('click', e => {
+  if (!document.body.classList.contains('attack')) return;
+  const el = e.target.closest('[data-level],[data-med],[data-attack]');
+  if (el) attackAction(el).catch(err => toast(err.message));
+});
 
 // ---------- my data ----------
 
@@ -464,43 +633,39 @@ function overuseBanner(o) {
 }
 
 function chart(series) {
-  const W = 600, H = 190, top = 8, bottom = 26, n = series.length;
+  const W = 600, H = 170, top = 8, bottom = 18, n = series.length;
   const bw = W / n, ph = H - top - bottom;
   const ps = series.map(p => p.pressure).filter(v => v != null);
   const pmin = Math.min(...ps), pmax = Math.max(...ps), pr = Math.max(pmax - pmin, 1);
-  const bands = [0, 1, 2].map(i => `<rect x="0" y="${top + i * ph / 3}" width="${W}" height="${ph / 3}" fill="${i % 2 ? '#2a2236' : '#30283d'}"/>`).join('');
   const bars = series.map((p, i) => {
-    const x = i * bw;
-    const h = p.headache ? Math.max(p.intensity, 1) / 10 * ph : 0;
-    const color = p.type === 'migraine' ? 'var(--migraine)' : 'var(--pink)';
-    const mark = p.logged ? `<rect x="${x + bw * 0.2}" y="${H - bottom + 6}" width="${Math.max(bw * 0.6, 2)}" height="${Math.max(bw * 0.6, 2)}" fill="${p.headache ? 'var(--text)' : '#8c84a0'}"/>`
-      : p.date <= today() ? `<rect x="${x + bw * 0.2}" y="${H - bottom + 8}" width="${Math.max(bw * 0.6, 2)}" height="2" fill="#5a5168"/>` : '';
-    return (h ? `<rect x="${x + bw * 0.15}" y="${top + ph - h}" width="${Math.max(bw * 0.7, 1)}" height="${h}" fill="${color}"><title>${fmtDate(p.date)}: ${p.intensity}/10</title></rect>` : '') + mark;
+    if (!p.headache) return '';
+    const h = Math.max(p.intensity, 1) / 10 * ph;
+    return `<rect x="${i * bw + bw * 0.15}" y="${top + ph - h}" width="${Math.max(bw * 0.7, 1)}" height="${h}" rx="2" fill="${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"><title>${fmtDate(p.date)}: ${p.intensity}/10</title></rect>`;
   }).join('');
-  const line = ps.length > 1 ? `<polyline fill="none" stroke="#cfc6dc" stroke-opacity=".7" stroke-width="1.5" stroke-dasharray="4 3" points="${series.map((p, i) => p.pressure == null ? null : `${i * bw + bw / 2},${top + ph - (p.pressure - pmin) / pr * ph}`).filter(Boolean).join(' ')}"/>` : '';
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Сила боли по дням и атмосферное давление">${bands}${bars}${line}</svg>
-    <div class="legend"><span><i style="background:var(--pink)"></i>головная боль</span><span><i style="background:var(--migraine)"></i>похоже на мигрень</span>
-      <span>╌ давление ${ps.length ? `${Math.round(pmin)}–${Math.round(pmax)} гПа` : '(укажите город)'}</span></div>`;
+  const line = ps.length > 1 ? `<polyline fill="none" stroke="var(--muted)" stroke-opacity=".8" stroke-width="1.5" stroke-linejoin="round" points="${series.map((p, i) => p.pressure == null ? null : `${i * bw + bw / 2},${top + ph - (p.pressure - pmin) / pr * ph}`).filter(Boolean).join(' ')}"/>` : '';
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Сила боли по дням и атмосферное давление">
+    <rect x="0" y="${top + ph}" width="${W}" height="1" fill="var(--line)"/>${bars}${line}</svg>
+    <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span>
+      <span>— давление ${ps.length ? `${Math.round(pmin)}–${Math.round(pmax)} гПа` : '(укажите город)'}</span></div>`;
 }
 
 // Radial map: the closer to the centre, the stronger the association.
 function factorMap(items, kind) {
   const S = 320, c = S / 2;
-  const color = kind === 'trigger' ? 'var(--migraine)' : 'var(--teal)';
+  const color = kind === 'trigger' ? 'var(--ha)' : 'var(--none)';
   const strength = x => kind === 'trigger' ? (x.ratio == null ? 1 : Math.min((x.ratio - 1) / 2, 1)) : Math.min((1 - x.ratio) / 0.8, 1);
-  const rings = [140, 105, 70].map((r, i) => `<circle cx="${c}" cy="${c}" r="${r}" fill="${['#1f1a28', '#262031', '#2d263a'][i]}"/>`).join('')
-    + `<circle cx="${c}" cy="${c}" r="148" fill="none" stroke="#5a5168" stroke-width="2" stroke-dasharray="1 7" stroke-linecap="round"/>`;
+  const rings = [148, 108, 68].map((r, i) => `<circle cx="${c}" cy="${c}" r="${r}" fill="var(--surface-2)" fill-opacity="${0.35 + i * 0.25}"/>`).join('');
   const nodes = items.map((x, i) => {
     const ang = -Math.PI / 2 + i * 2 * Math.PI / items.length;
-    const r = 122 - strength(x) * 80;
+    const r = 124 - strength(x) * 80;
     const px = c + r * Math.cos(ang), py = c + r * Math.sin(ang);
     const f = factorDef(x.factor);
     return `<g><title>${esc(f.label)}: ${pct(x.p_with)} против ${pct(x.p_without)}</title>
       <circle cx="${px}" cy="${py}" r="21" fill="${color}"/><text x="${px}" y="${py + 7}" text-anchor="middle" font-size="20">${f.icon}</text></g>`;
   }).join('');
   return `<svg class="map" viewBox="0 0 ${S} ${S}" role="img" aria-label="${kind === 'trigger' ? 'Карта провокаторов' : 'Карта защиты'}">${rings}
-    <text x="${c}" y="${c - 4}" text-anchor="middle" font-size="12" fill="#8c84a0">Сильная</text>
-    <text x="${c}" y="${c + 12}" text-anchor="middle" font-size="12" fill="#8c84a0">связь</text>${nodes}</svg>`;
+    <text x="${c}" y="${c - 4}" text-anchor="middle" font-size="12" fill="var(--muted)">Сильная</text>
+    <text x="${c}" y="${c + 12}" text-anchor="middle" font-size="12" fill="var(--muted)">связь</text>${nodes}</svg>`;
 }
 
 function mapCard(title, items, kind, note) {
@@ -527,16 +692,16 @@ async function renderData(days) {
       <div class="section" style="margin-top:12px">
         <span class="sic">📋</span>
         <div class="sbody"><div class="cap">Сводка</div>
-          <div class="stat"><i style="background:#8c84a0"></i>Заполнено дней: <b>${s.logged_days}</b></div>
-          <div class="stat"><i style="background:#5a5168"></i>Не заполнено: <b>${s.series.filter(p => !p.logged && p.date <= to).length}</b></div>
-          <div class="stat"><i style="background:var(--teal)"></i>Дней без боли: <b>${s.pain_free_days}</b></div>
+          <div class="stat"><i style="background:var(--muted)"></i>Заполнено дней: <b>${s.logged_days}</b></div>
+          <div class="stat"><i style="background:var(--faint)"></i>Не заполнено: <b>${s.series.filter(p => !p.logged && p.date <= to).length}</b></div>
+          <div class="stat"><i style="background:var(--none)"></i>Дней без боли: <b>${s.pain_free_days}</b></div>
         </div>
       </div>
       <div class="section">
-        <span class="sic">${ICON_PAIN.replace('<svg ', '<svg width="34" height="34" ')}</span>
+        <span class="sic">∿</span>
         <div class="sbody"><div class="cap">Головная боль и мигрень</div>
-          <div class="stat"><i style="background:var(--pink)"></i>Дней с головной болью: <b>${s.headache_days - s.migraine_days}</b></div>
-          <div class="stat"><i style="background:var(--migraine)"></i>Похоже на мигрень: <b>${s.migraine_days}</b></div>
+          <div class="stat"><i style="background:var(--ha)"></i>Дней с головной болью: <b>${s.headache_days - s.migraine_days}</b></div>
+          <div class="stat"><i style="background:var(--mi)"></i>Похоже на мигрень: <b>${s.migraine_days}</b></div>
           <p class="muted" style="margin-top:8px">Приступов: <b>${s.attack_count}</b> · средняя сила <b>${s.avg_intensity ?? '—'}</b> из 10</p>
         </div>
       </div>
@@ -545,7 +710,7 @@ async function renderData(days) {
         <div class="sbody"><div class="cap">Лекарства</div>
           <div class="stat">Дней с обезболивающими: <b>${s.med_days}</b></div>
           ${s.med_effect.map(m => `<div style="margin:10px 0 4px"><div class="spread"><span>${esc(m.name)} ${esc(m.dose)}</span><span class="muted">${m.count} раз</span></div>
-            <div class="bar"><i style="width:${m.full / m.count * 100}%;background:var(--teal)"></i><i style="width:${m.partial / m.count * 100}%;background:var(--i1)"></i><i style="width:${m.none / m.count * 100}%;background:var(--i3)"></i></div>
+            <div class="bar"><i style="width:${m.full / m.count * 100}%;background:var(--none)"></i><i style="width:${m.partial / m.count * 100}%;background:var(--i1)"></i><i style="width:${m.none / m.count * 100}%;background:var(--i3)"></i></div>
             <span class="muted">помогло ${m.full} · частично ${m.partial} · нет ${m.none}</span></div>`).join('')}
         </div>
       </div>
@@ -602,7 +767,7 @@ async function renderReport(from, to) {
       ${overuseBanner(s.overuse)}
       <div class="card"><h2>Календарь</h2>
         <div class="strip">${s.series.map(p => `<i class="${p.type ? 't-' + p.type : ''}" title="${fmtDate(p.date)}"></i>`).join('')}</div>
-        <div class="legend"><span><i style="background:var(--teal)"></i>без боли</span><span><i style="background:var(--pink)"></i>головная боль</span><span><i style="background:var(--migraine)"></i>похоже на мигрень</span><span><i style="background:#e6e6e6"></i>нет записи</span></div>
+        <div class="legend"><span><i style="background:var(--none)"></i>без боли</span><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span><span><i style="background:#ececec"></i>нет записи</span></div>
       </div>
       ${s.med_effect.length ? `<div class="card"><h2>Препараты</h2><table>
         <tr><th>Препарат</th><th>Приёмов</th><th>Помогло</th><th>Частично</th><th>Нет</th></tr>
@@ -669,6 +834,14 @@ async function renderSettings() {
   const csv = await api.csv();
   $view.innerHTML = `
     <h1>Настройки</h1>
+    <h3>Оформление</h3>
+    <div class="card">
+      <div class="themes">${Object.entries(THEMES).map(([k, th]) => `<button data-theme-pick="${k}" class="${(document.documentElement.dataset.theme || 'moss') === k ? 'on' : ''}">
+        <div class="sw">${th.sw.map(c => `<i style="background:${c};box-shadow:0 0 0 1px var(--line)"></i>`).join('')}</div>${th.name}</button>`).join('')}</div>
+      <label class="field" style="margin-bottom:0"><span>Яркость приложения</span>
+        <input type="range" class="plain" id="bright" min="0.5" max="1" step="0.05" value="${1 - Number(pref.get('dim', 0))}" aria-label="Яркость приложения"></label>
+      <p class="muted">Если свет раздражает, сдвиньте влево. Тёмные темы удобнее вечером и во время приступа.</p>
+    </div>
     <h3>Разделы дневника</h3>
     <div class="list">${CFG.modules.map(m => `
       <div class="frow"><span class="fic">${m.icon}</span><div class="fbody"><div class="flabel">${m.title}</div>
@@ -734,6 +907,12 @@ async function renderSettings() {
     </div>`;
 
   const $ = id => document.getElementById(id);
+  $view.querySelectorAll('[data-theme-pick]').forEach(b => b.onclick = () => {
+    pref.set('theme', b.dataset.themePick);
+    applyTheme(b.dataset.themePick);
+    $view.querySelectorAll('[data-theme-pick]').forEach(x => x.classList.toggle('on', x === b));
+  });
+  $('bright').oninput = e => { pref.set('dim', String(Math.round((1 - Number(e.target.value)) * 100) / 100)); applyDim(); };
   $view.querySelectorAll('[data-module]').forEach(b => b.onclick = async () => {
     const key = b.dataset.module;
     const next = s.modules.includes(key) ? s.modules.filter(k => k !== key) : [...s.modules, key];
@@ -805,6 +984,8 @@ async function renderSettings() {
 
 // ---------- boot ----------
 
+applyTheme(pref.get('theme', 'moss'));
+applyDim();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
 // Ask the browser not to evict the diary's storage when space runs low.
 navigator.storage?.persist?.().catch(() => { });

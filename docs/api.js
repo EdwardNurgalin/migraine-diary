@@ -57,6 +57,31 @@ export async function saveDay(date, body) {
 
 export const deleteDay = date => store.del('days', date);
 
+/**
+ * Attack mode: record "it hurts now" in a couple of taps. Adds to today's record without touching
+ * anything already filled in; details can be added later in the normal form.
+ */
+export async function quickAttack(intensity, medIds) {
+  const date = stats.today();
+  const now = new Date();
+  const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const old = await store.get('days', date);
+  const day = old || { date, factors: {}, period: false, sleep_hours: null, note: '', attacks: [], doses: [] };
+  const doses = medIds.map(med_id => ({ med_id, time, effect: null }));
+  if (day.attacks.length) {
+    const a = day.attacks[0];
+    a.intensity = Math.max(a.intensity, intensity);
+    a.doses = [...a.doses, ...doses];
+  } else {
+    day.attacks = [{ start_time: time, end_time: null, intensity, location: [], character: [], symptoms: [], note: '', doses }];
+  }
+  return saveDay(date, { ...day, headache: true });
+}
+
+export async function cycle() {
+  return stats.cycle(await store.getAll('days'));
+}
+
 export async function summary(from, to) {
   await refreshWeather();
   // Overuse looks 30 days back from `to`, so load a bit more than the range itself.
