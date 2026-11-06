@@ -8,6 +8,17 @@
 // `exposed` is the threshold from which a day counts as "the factor was present" in the analysis.
 
 export const MODULES = [
+  // Premonitory symptoms: hours to two days before an attack. The most practical early warning there is.
+  { key: 'prodrome', title: 'Ранние сигналы', icon: '🔔', factors: [
+    { key: 'yawn', label: 'Частая зевота', icon: '🥱', type: 'bool', exposed: true },
+    { key: 'tired', label: 'Усталость, разбитость', icon: '😪', type: 'bool', exposed: true },
+    { key: 'neck', label: 'Напряжение в шее', icon: '🦒', type: 'bool', exposed: true },
+    { key: 'crave', label: 'Тяга к сладкому', icon: '🍬', type: 'bool', exposed: true },
+    { key: 'irritable', label: 'Раздражительность', icon: '😤', type: 'bool', exposed: true },
+    { key: 'low_mood', label: 'Подавленность', icon: '🌧', type: 'bool', exposed: true },
+    { key: 'light_sens', label: 'Свет раздражает сильнее', icon: '🔆', type: 'bool', exposed: true },
+    { key: 'foggy', label: 'Трудно сосредоточиться', icon: '🌫', type: 'bool', exposed: true },
+  ] },
   { key: 'emotions', title: 'Эмоции', icon: '🙂', factors: [
     { key: 'stress', label: 'Стресс', icon: '😣', type: 'level', exposed: 2 },
     { key: 'anxiety', label: 'Тревога', icon: '😟', type: 'level', exposed: 2 },
@@ -85,7 +96,7 @@ export function customFactor(label, type, module) {
 export function buildModules(custom = [], disabled = []) {
   return MODULES.map(m => ({
     ...m,
-    factors: [...m.factors, ...custom.filter(c => c.module === m.key)].map(f => ({ ...f, enabled: !disabled.includes(f.key) })),
+    factors: [...m.factors, ...custom.filter(c => c.module === m.key)].map(f => ({ ...f, module: m.key, enabled: !disabled.includes(f.key) })),
   }));
 }
 

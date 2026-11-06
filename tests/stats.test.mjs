@@ -1,7 +1,8 @@
 // Run: node --test tests/*.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addDays, cycle, isMigraine, overuse, summary, today } from '../docs/stats.js';
+import { addDays, cycle, isMigraine, medEfficacy, menstrualWindow, monthly, overuse, preventiveResponse, riskTomorrow, summary, today } from '../docs/stats.js';
+import { FACTORS } from '../docs/config.js';
 
 const attack = over => ({ start_time: '10:00', end_time: '14:00', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [], ...over });
 
@@ -92,4 +93,91 @@ test('cycle: a forgotten mark inside a period does not split it; no forecast fro
   const c = cycle(days);
   assert.equal(c.periods.length, 1);
   assert.deepEqual(c.forecast, []);
+});
+
+test('factors: a factor that acts the next day is found with lag 1', () => {
+  const to = '2026-10-30', from = addDays(to, -59);
+  const days = [];
+  for (let i = 0; i < 60; i++) {
+    const date = addDays(from, i);
+    const alcohol = i % 4 === 0;                     // alcohol every 4th day
+    const headache = i % 4 === 1 || i % 8 === 0;     // always the day after, sometimes the same day
+    days.push(day(date, { headache, factors: { alcohol: alcohol ? 2 : 0 }, attacks: headache ? [attack({})] : [] }));
+  }
+  const s = summary({ from, to, days, weather: {}, health: {}, meds });
+  const a = s.factors.items.find(x => x.factor === 'alcohol');
+  assert.equal(a.lag, 1);
+  assert.equal(a.kind, 'trigger');
+  assert.equal(a.p_with, 1);
+});
+
+test('monthly: headache, migraine and acute-medication days per month', () => {
+  const days = [
+    day('2026-09-10', { headache: true, attacks: [attack({ location: ['left'], character: ['pulsating'], symptoms: ['nausea'], doses: [{ med_id: 1, effect: 'full' }] })] }),
+    day('2026-09-11'),
+    day('2026-10-02', { headache: true, attacks: [attack({ doses: [{ med_id: 3, effect: null }] })] }),
+  ];
+  const m = monthly(days, medsById, '2026-09-01', '2026-10-31');
+  assert.deepEqual(m.map(x => [x.month, x.logged, x.headache, x.migraine, x.med]), [['2026-09', 2, 1, 1, 1], ['2026-10', 1, 1, 0, 0]]);
+});
+
+test('menstrual window: attacks in days −2..+3 in 2 of 3 cycles → likely menstrual migraine', () => {
+  const starts = ['2026-07-01', '2026-07-29', '2026-08-26'];
+  const days = [];
+  for (let d = '2026-06-26'; d <= '2026-09-05'; d = addDays(d, 1)) days.push(day(d, { period: starts.some(s => d >= s && d <= addDays(s, 4)) }));
+  for (const d of ['2026-06-30', '2026-07-30']) Object.assign(days.find(x => x.date === d), { headache: true });
+  const w = menstrualWindow(days, cycle(days));
+  assert.equal(w.cycles, 3);
+  assert.equal(w.with_attack, 2);
+  assert.equal(w.likely, true);
+});
+
+test('medication efficacy: two-hour relief and early vs late intake', () => {
+  const days = [
+    day('2026-10-01', { headache: true, attacks: [attack({ start_time: '10:00', doses: [{ med_id: 1, time: '10:30', effect: 'full' }] })] }),
+    day('2026-10-05', { headache: true, attacks: [attack({ start_time: '10:00', doses: [{ med_id: 1, time: '13:00', effect: 'none' }] })] }),
+    day('2026-10-09', { headache: true, attacks: [attack({ start_time: '23:30', doses: [{ med_id: 1, time: '00:10', effect: 'partial' }] })] }),
+  ];
+  const [m] = medEfficacy(days, medsById);
+  assert.deepEqual([m.n, m.free, m.better, m.none], [3, 1, 1, 1]);
+  assert.deepEqual(m.early, { helped: 2, of: 2 });
+  assert.deepEqual(m.late, { helped: 0, of: 1 });
+  assert.equal(m.median_delay, 40);
+});
+
+test('preventive response: headache days per 30 before vs after the first month', () => {
+  const start = '2026-06-01';
+  const days = [];
+  for (let i = -90; i < 120; i++) {
+    const date = addDays(start, i);
+    const headache = i < 0 ? i % 3 === 0 : i % 9 === 0;   // ~10 per 30 before, ~3.3 after
+    days.push(day(date, { headache }));
+  }
+  const r = preventiveResponse(days, { name: 'Пропранолол', dose: '40', start_date: start, stop_date: addDays(start, 119) });
+  assert.equal(r.before.per30, 10);
+  assert.ok(r.after.per30 < 4);
+  assert.equal(r.responder, true);
+});
+
+test('risk: rules first, then a personal model that is checked before use', () => {
+  const t = '2026-10-30';
+  const rules = riskTomorrow({
+    days: [day(t, { factors: { stress: 3, alcohol: 2 }, sleep_hours: 5 })],
+    cyc: { periods: [], forecast: [] }, weather: { [addDays(t, 1)]: { pressure_delta: -7 } }, defs: FACTORS, date: t,
+  });
+  assert.equal(rules.level, 'high');
+  assert.ok(rules.reasons.some(r => r.key === 'pressure'));
+  assert.equal(rules.model.ready, false);
+
+  // 120 days where short sleep the night before reliably precedes pain.
+  const days = [];
+  for (let i = 0; i < 120; i++) {
+    const date = addDays(t, -120 + i);
+    const short = i % 3 === 0;
+    const prevShort = (i - 1) % 3 === 0;
+    days.push(day(date, { sleep_hours: short ? 5 : 8, headache: prevShort, attacks: prevShort ? [attack({})] : [] }));
+  }
+  const learned = riskTomorrow({ days, cyc: { periods: [], forecast: [] }, weather: {}, defs: FACTORS, date: days.at(-1).date });
+  assert.equal(learned.model.ready, true);
+  assert.ok(learned.model.auc >= 0.9);
 });

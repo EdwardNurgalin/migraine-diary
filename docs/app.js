@@ -16,7 +16,9 @@ const L = {
     simple: 'Обезболивающее / НПВС', triptan: 'Триптан', combo: 'Комбинированное', opioid: 'Опиоид',
     ergot: 'Эрготамин', preventive: 'Профилактика', other: 'Другое',
   },
-  effects: { full: 'Помогло', partial: 'Частично', none: 'Не помогло' },
+  effects: { full: 'Прошло', partial: 'Легче', none: 'Не помогло' },
+  // How much the attack got in the way: the standard 4-step disability scale from headache trials.
+  disability: ['Не мешала', 'Немного мешала', 'Сильно мешала', 'Пришлось лечь'],
   types: { none: 'Без головной боли', headache: 'Головная боль', migraine: 'Похоже на мигрень' },
 };
 const LEVELS = ['Нет', 'Немного', 'Заметно', 'Сильно'];
@@ -77,7 +79,7 @@ function setPath(obj, path, val) {
 
 // ---------- router ----------
 
-const TAB_OF = { diary: 'diary', log: 'diary', attack: 'diary', calendar: 'calendar', data: 'data', report: 'data', settings: 'settings' };
+const TAB_OF = { diary: 'diary', log: 'diary', attack: 'diary', survey: 'data', calendar: 'calendar', data: 'data', report: 'data', settings: 'settings' };
 
 async function route() {
   let [name, a, b] = (location.hash.slice(1) || 'diary').split('/');
@@ -86,7 +88,7 @@ async function route() {
   if (name !== 'attack') attackState = null;
   document.body.classList.toggle('wizard', name === 'log');
   document.body.classList.toggle('attack', name === 'attack');
-  applyDim(name === 'attack' ? 0.2 : 0);
+  applyDim(name === 'attack' ? Number(pref.get('attack_dim', 0.2)) : 0);
   document.querySelectorAll('.tabs a').forEach(el => el.classList.toggle('on', el.dataset.tab === TAB_OF[name]));
   window.scrollTo(0, 0);
   const valid = d => d && /^\d{4}-\d\d-\d\d$/.test(d) && d <= today() ? d : today();
@@ -97,8 +99,11 @@ async function route() {
     calendar: () => renderCalendar(a || today().slice(0, 7)),
     data: () => renderData(Number(a) || 30),
     report: () => renderReport(a, b),
+    survey: () => renderSurvey(a),
     settings: renderSettings,
   };
+  if (!unlocked && await api.hasPin()) return renderLock();
+  document.body.classList.remove('locked');
   try {
     if (!CFG) await loadBase();
     await (views[name] || views.diary)();
@@ -108,6 +113,43 @@ async function route() {
   }
 }
 window.route = route;
+
+// ---------- PIN lock ----------
+
+let unlocked = false, hiddenAt = 0, pinTyped = '';
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) hiddenAt = Date.now();
+  else if (unlocked && Date.now() - hiddenAt > 5 * 60 * 1000) { unlocked = false; route(); }
+});
+
+function renderLock() {
+  document.body.classList.add('locked');
+  pinTyped = '';
+  const draw = () => {
+    $view.innerHTML = `<div class="lock">
+      <div class="attack-head" style="margin-top:50px"><b>Дневник</b><span>Введите код</span></div>
+      <div class="pindots">${[0, 1, 2, 3].map(i => `<i class="${i < pinTyped.length ? 'on' : ''}"></i>`).join('')}</div>
+      <div class="keypad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map(k => k ? `<button data-key="${k}" aria-label="${k === '⌫' ? 'Стереть' : k}">${k}</button>` : '<span></span>').join('')}</div>
+      <button class="ghost" id="forgot" style="margin:18px auto 0;display:block">Забыли код?</button></div>`;
+    $view.querySelectorAll('[data-key]').forEach(b => b.onclick = async () => {
+      const k = b.dataset.key;
+      pinTyped = k === '⌫' ? pinTyped.slice(0, -1) : (pinTyped + k).slice(0, 4);
+      draw();
+      if (pinTyped.length === 4) {
+        if (await api.checkPin(pinTyped)) { unlocked = true; route(); }
+        else { toast('Неверный код'); pinTyped = ''; draw(); }
+      }
+    });
+    document.getElementById('forgot').onclick = async () => {
+      if (!confirm('Код можно сбросить только вместе со всеми данными на этом телефоне. Если есть резервная копия, её можно будет восстановить. Сбросить?')) return;
+      await api.deleteAll();
+      unlocked = true;
+      CFG = null;
+      route();
+    };
+  };
+  draw();
+}
 window.addEventListener('hashchange', route);
 
 // ---------- theme & brightness ----------
@@ -121,6 +163,7 @@ const THEMES = {
 const pref = {
   get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* private mode */ } },
 };
 function applyTheme(t) {
   if (!THEMES[t]) t = 'moss';
@@ -140,24 +183,24 @@ const TYPE_COLOR = { none: 'var(--none)', headache: 'var(--ha)', migraine: 'var(
 
 // ---------- diary home ----------
 
-// Minimal marks: only pain days are filled; pain-free days are plain numbers, unfilled days are faint.
-function numClass(p, selected) {
-  const cls = ['num'];
-  if (p.type === 'headache' || p.type === 'migraine') cls.push(`t-${p.type}`);
-  else if (!p.logged) cls.push('unlogged');
-  if (p.date === selected) cls.push('sel');
-  return cls.join(' ');
+// Calendar mark: a disk behind the number whose size shows how strong the pain was (bigger = stronger);
+// the colour tells headache from migraine-like; past days without a record get a small "?".
+function dayMark(p, { selected = false, isToday = false, meds = true } = {}) {
+  const future = p.date > today();
+  const size = p.headache ? Math.round(13 + Math.max(p.intensity, 1) * 2.3) : 0;
+  const cls = ['num', future && 'future', !future && !p.logged && 'unlogged', selected && 'sel', isToday && 'today', size >= 26 && 'dark'].filter(Boolean).join(' ');
+  return `<span class="${cls}">${size ? `<i class="disk" style="width:${size}px;height:${size}px;background:${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"></i>` : ''}<b>${Number(p.date.slice(8))}</b>${!future && !p.logged ? '<sup class="q">?</sup>' : ''}${meds && p.meds ? '<i class="medmark"></i>' : ''}</span>`;
 }
 
 async function renderDiary(d) {
   const end = [addDays(d, 3), today()].sort()[0], start = addDays(end, -6);
-  const [day, s, set] = await Promise.all([api.day(d), api.summary(start, end), api.settings()]);
+  const [day, s, set, pending, risk] = await Promise.all([api.day(d), api.summary(start, end), api.settings(), api.pendingEffects(), api.risk()]);
   const backupDue = s.logged_days > 0 && (!set.last_backup || Date.now() - set.last_backup > BACKUP_EVERY_MS);
   if (backupDue) await prepareBackup();
   const strip = s.series.map(p => {
     const dt = parseISO(p.date);
     return `<a href="#diary/${p.date}" aria-label="${fmtDate(p.date)}${p.type ? ', ' + L.types[p.type] : ', не заполнен'}">
-      <span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span><span class="${numClass(p, d)}">${dt.getDate()}${p.meds ? '<i class="medmark"></i>' : ''}</span></a>`;
+      <span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span>${dayMark(p, { selected: p.date === d })}</a>`;
   }).join('');
 
   $view.innerHTML = `
@@ -166,17 +209,39 @@ async function renderDiary(d) {
       <b>Добавьте дневник на экран «Домой»</b>
       <p style="font-size:14px">«Поделиться» → «На экран „Домой“». Дальше открывайте иконку: записи из вкладки Safari в ней не появятся.</p></div>` : ''}
     <div class="weekstrip">${strip}<a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
+    ${pending.map(x => `<div class="card effcard"><div>Помог ли ${esc(x.name)}, принятый ${x.date === today() ? '' : 'вчера '}в ${x.time}?</div>
+      <div class="effbtns">${Object.entries(L.effects).map(([k, v]) => `<button data-eff="${k}" data-date="${x.date}" data-ai="${x.ai}" data-di="${x.di}">${v}</button>`).join('')}</div></div>`).join('')}
     ${day.day ? dayCard(day) : `
       <p class="question">Болела ли голова ${dayWord(d)}?</p>
       <a class="choice no" href="#log/${d}/no"><span class="ic">✓</span><span>Нет, всё спокойно<small>Отметить, как прошёл день</small></span></a>
       <a class="choice yes" href="#log/${d}/yes"><span class="ic">∿</span><span>Да, болела<small>Приступ, лекарства и факторы</small></span></a>`}
     ${d === today() ? '<a class="attackbtn" href="#attack">☾ Болит сейчас — записать в два касания</a>' : ''}
+    ${d === today() ? riskCard(risk) : ''}
     ${s.overuse.status !== 'ok' ? overuseBanner(s.overuse) : ''}
     ${backupDue ? `<div class="banner ok"><b>Пора сделать резервную копию</b>
       <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
       <button class="primary" data-backup style="margin-top:6px">Сохранить копию</button></div>` : ''}`;
   $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
+  $view.querySelectorAll('[data-eff]').forEach(b => b.onclick = async () => {
+    await api.setEffect(b.dataset.date, Number(b.dataset.ai), Number(b.dataset.di), b.dataset.eff);
+    toast('Отмечено');
+    renderDiary(d);
+  });
   $view.querySelector('[data-hide-hint]')?.addEventListener('click', e => { pref.set('install_hint_hidden', '1'); e.target.closest('.banner').remove(); });
+}
+
+const RISK_LABEL = { low: 'обычный', medium: 'немного выше обычного', high: 'повышенный' };
+
+function riskCard(r) {
+  if (!r) return '';
+  const m = r.model;
+  return `<div class="card riskcard ${r.level}">
+    <div class="spread"><b>Риск на завтра</b><span class="lvl">${RISK_LABEL[r.level]}</span></div>
+    <p>${r.reasons.length ? r.reasons.map(x => x.text).join(', ') : 'Особых причин для приступа не видно.'}</p>
+    ${r.level !== 'low' ? `<p class="tip">${r.reasons.slice(0, 2).map(x => x.tip).join(' ')}</p>` : ''}
+    <p class="model">${m.ready ? `Личная модель: вероятность ${m.prob}%, обычно ${m.base}%. Проверена на ваших последних днях (AUC ${m.auc}).`
+      : m.auc != null ? `Личная модель пока предсказывает не лучше случайности (AUC ${m.auc}) — прогноз по общим правилам.`
+      : `Прогноз по общим правилам. Личная модель появится, когда наберётся ${m.need} пар заполненных дней подряд (сейчас ${m.have}).`}</p></div>`;
 }
 
 // The hint matters only in Safari on iPhone/iPad, where the browser tab and the Home Screen app keep separate data.
@@ -232,7 +297,8 @@ async function startWizard(d, headache) {
     attack: a ? {
       start_time: a.start_time || '', end_time: a.end_time || '', intensity: a.intensity,
       location: a.location, character: a.character, symptoms: a.symptoms, note: a.note, doses: a.doses.map(toDose),
-    } : { start_time: d === today() ? nowTime() : '', end_time: '', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [] },
+      disability: a.disability ?? null, recurred: !!a.recurred,
+    } : { start_time: d === today() ? nowTime() : '', end_time: '', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [], disability: null, recurred: false },
     doses: data.doses.map(toDose),
   };
   // Old days and in-between edits may hold doses on the "other" side; keep them visible in this flow.
@@ -300,7 +366,8 @@ function doseList(path, list) {
         <div class="tcompact">${timeField(`${path}.${i}.time`, x.time)}</div>
         <button class="ghost" data-act="rm-dose" data-path="${path}" data-i="${i}" aria-label="Удалить">✕</button>
       </div>
-      <div class="pills" style="margin-top:10px">${Object.entries(L.effects).map(([k, v]) =>
+      <div class="muted" style="margin-top:10px">Через 2 часа после приёма:</div>
+      <div class="pills" style="margin-top:6px">${Object.entries(L.effects).map(([k, v]) =>
         `<button class="pill teal ${x.effect === k ? 'on' : ''}" data-act="effect" data-path="${path}.${i}.effect" data-val="${k}">${v}</button>`).join('')}</div>
     </div>`).join('')}</div>
     ${active.length ? `<button class="wide" style="margin-top:10px" data-act="add-dose" data-path="${path}">+ Добавить приём</button>` : ''}`;
@@ -325,13 +392,16 @@ function stepBody(st) {
         <div class="spread muted" style="margin-top:6px"><span>слабая</span><span>невыносимая</span></div>
       </div>
       <h3>Где болит</h3>${pills('attack.location', L.location, a.location)}
-      <h3>Какая боль</h3>${pills('attack.character', L.character, a.character)}`;
+      <h3>Какая боль</h3>${pills('attack.character', L.character, a.character)}
+      <h3>Насколько мешала</h3><div class="pills">${L.disability.map((t, i) => `<button class="pill ${a.disability === i ? 'on' : ''}" data-act="dis" data-val="${i}">${t}</button>`).join('')}</div>`;
     case 'symptoms': return `
       <h1>Симптомы</h1><p class="wiz-sub">Что ещё было во время приступа</p>
       <div class="list">${Object.entries(L.symptoms).map(([k, [label, icon]]) => `
         <div class="frow"><span class="fic pink">${icon}</span><div class="fbody"><div class="flabel">${label}</div></div>
           <button class="switch ${a.symptoms.includes(k) ? 'on' : ''}" data-act="toggle" data-path="attack.symptoms" data-val="${k}" role="switch" aria-label="${esc(label)}"></button></div>`).join('')}
-      </div>`;
+      </div>
+      <div class="list" style="margin-top:12px"><div class="frow"><span class="fic">↻</span><div class="fbody"><div class="flabel">Боль вернулась в течение суток</div><div class="fval">после того как прошла</div></div>
+        <button class="switch ${a.recurred ? 'on' : ''}" data-act="recur" role="switch" aria-label="Боль вернулась в течение суток"></button></div></div>`;
     case 'meds': return dr.headache
       ? `<h1>Лекарства</h1><p class="wiz-sub">Что принимали от этого приступа и помогло ли</p>${doseList('attack.doses', a.doses)}`
       : `<h1>Лекарства</h1><p class="wiz-sub">Если принимали что-то ${when} — например, профилактику</p>${doseList('doses', dr.doses)}`;
@@ -345,7 +415,7 @@ function stepBody(st) {
           </div>
           <div class="fval" id="sleepDur">${dr.sleep_hours != null ? `Сон: ${fmtHours(dr.sleep_hours)}${!dr.sleep_start && wz.healthSleep ? ' (из «Здоровья»)' : ''}` : 'Укажите, когда заснули и проснулись'}</div>
         </div></div>`
-        : m.key === 'women' ? `
+        : m.key === 'women' && CFG.trackCycle ? `
         <div class="frow"><span class="fic">🩸</span><div class="fbody"><div class="flabel">Менструация</div><div class="fval">${dr.period ? 'Да' : 'Нет'}</div></div>
           <button class="switch ${dr.period ? 'on' : ''}" data-act="period" role="switch" aria-label="Менструация"></button></div>` : '';
       return `<h1>${m.icon} ${m.title}</h1><p class="wiz-sub">Что было ${when}</p>
@@ -433,6 +503,8 @@ async function wizardAction(el) {
       break;
     }
     case 'period': dr.period = !dr.period; break;
+    case 'dis': { const v = Number(el.dataset.val); dr.attack.disability = dr.attack.disability === v ? null : v; break; }
+    case 'recur': dr.attack.recurred = !dr.attack.recurred; break;
     case 'toggle': {
       const arr = getPath(dr, el.dataset.path), v = el.dataset.val;
       arr.includes(v) ? arr.splice(arr.indexOf(v), 1) : arr.push(v);
@@ -491,8 +563,8 @@ window.addEventListener('beforeunload', e => { if (wz?.dirty) e.preventDefault()
 
 const calPrefs = () => ({
   meds: pref.get('cal_meds', '1') === '1',
-  cycle: pref.get('cal_cycle', '1') === '1',
-  view: pref.get('cal_view', 'month'),
+  cycle: CFG.trackCycle && pref.get('cal_cycle', '1') === '1',
+  view: pref.get('cal_view', 'month') === 'month' ? 'month' : 'list',
 });
 
 // The one medication limit closest to being reached, as a short phrase for the summary line.
@@ -517,9 +589,9 @@ async function renderCalendar(ym) {
     <p class="sumline"><b>${n}</b> ${plural(n, 'день', 'дня', 'дней')} боли · <b>${data.migraine_days}</b> похоже на мигрень · ${overuseText(data.overuse)}</p>
     <div class="seg" style="margin-bottom:16px">
       <button data-view="month" class="${pr.view === 'month' ? 'on' : ''}">Месяц</button>
-      <button data-view="tracks" class="${pr.view === 'tracks' ? 'on' : ''}">Дорожки</button>
+      <button data-view="list" class="${pr.view === 'list' ? 'on' : ''}">Хронология</button>
     </div>
-    ${pr.view === 'tracks' ? tracksView(data, cyc) : monthGrid(data, cyc, pr, ym)}`;
+    ${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}`;
 
   $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
   $view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { pref.set('cal_view', b.dataset.view); renderCalendar(ym); });
@@ -529,6 +601,7 @@ async function renderCalendar(ym) {
     renderCalendar(ym);
   });
   $view.querySelectorAll('[data-day]').forEach(b => b.onclick = () => showPeek(b.dataset.day, cyc).catch(err => toast(err.message)));
+  $view.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { location.hash = `#diary/${b.dataset.open}`; });
 }
 
 function monthGrid(data, cyc, pr, ym) {
@@ -537,19 +610,18 @@ function monthGrid(data, cyc, pr, ym) {
   const fc = new Set(cyc.forecast);
   const cells = data.series.map(p => {
     const future = p.date > t;
-    const cls = future ? 'num future' : numClass(p, t).replace(' sel', ' today');
-    const med = pr.meds && p.meds ? '<i class="medmark"></i>' : '';
     const per = !pr.cycle ? '' : p.period ? '<i class="perline"></i>' : fc.has(p.date) && !p.logged ? '<i class="perline fc"></i>' : '';
-    return `<button class="cd" data-day="${p.date}" ${future ? 'disabled' : ''} aria-label="${fmtDate(p.date)}, ${p.type ? L.types[p.type] : 'не заполнен'}${p.meds ? ', лекарства' : ''}${p.period ? ', менструация' : ''}">
-      <span class="${cls}">${Number(p.date.slice(8))}${med}</span>${per}</button>`;
+    return `<button class="cd" data-day="${p.date}" ${future ? 'disabled' : ''} aria-label="${fmtDate(p.date)}, ${p.type ? L.types[p.type] + (p.headache ? `, сила ${p.intensity}` : '') : 'не заполнен'}${p.meds ? ', лекарства' : ''}${p.period ? ', менструация' : ''}">
+      ${dayMark(p, { isToday: p.date === t, meds: pr.meds })}${per}</button>`;
   }).join('');
   const next = cyc.forecast[0];
   return `
     <div class="cal">${DOW.map(d => `<div class="dow">${d.toLowerCase()}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>
-    <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span></div>
+    <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span>
+      <span>чем больше круг, тем сильнее боль</span><span>? — день не заполнен</span></div>
     <div class="toggles">
       <button data-cal-toggle="cal_meds" class="${pr.meds ? 'on' : ''}" aria-pressed="${pr.meds}"><i style="background:var(--med)"></i>Лекарства</button>
-      <button data-cal-toggle="cal_cycle" class="${pr.cycle ? 'on' : ''}" aria-pressed="${pr.cycle}"><i style="background:var(--per)"></i>Цикл</button>
+      ${CFG.trackCycle ? `<button data-cal-toggle="cal_cycle" class="${pr.cycle ? 'on' : ''}" aria-pressed="${pr.cycle}"><i style="background:var(--per)"></i>Цикл</button>` : ''}
     </div>
     <div id="peek"></div>
     ${pr.cycle && next && next >= t ? `<p class="muted" style="margin-top:12px">Следующая менструация ожидается около ${fmtDate(next)} (бледная линия).</p>` : ''}`;
@@ -558,7 +630,7 @@ function monthGrid(data, cyc, pr, ym) {
 async function showPeek(date, cyc) {
   const data = await api.day(date);
   $view.querySelectorAll('.cd .num').forEach(el => el.classList.toggle('sel', el.closest('[data-day]').dataset.day === date));
-  const cd = cyc.dayOf(date);
+  const cd = CFG.trackCycle ? cyc.dayOf(date) : null;
   const el = document.getElementById('peek');
   if (!data.day) {
     el.innerHTML = `<div class="peek"><div class="spread"><b>${fmtDate(date)}</b><a href="#diary/${date}">Заполнить</a></div>
@@ -580,42 +652,30 @@ async function showPeek(date, cyc) {
     <a href="#diary/${date}">Открыть день</a></div>`;
 }
 
-// Same month as rows: pain, medication, cycle, pressure. Shows what coincides with what.
-function tracksView(data, cyc) {
-  const s = data.series, n = s.length, W = 300, cw = W / n, t = today();
-  // Only pain bars: a row of tiny marks for the other days would read as a dotted line (pattern glare).
-  const pain = s.map((p, i) => p.headache
-    ? `<rect x="${i * cw + 0.6}" y="${40 - p.intensity * 4}" width="${cw - 1.2}" height="${p.intensity * 4}" rx="1.5" fill="${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"/>`
-    : '').join('');
-  const medsRow = s.map((p, i) => p.meds ? `<circle cx="${i * cw + cw / 2}" cy="5" r="3" fill="var(--med)"/>` : '').join('');
-  const fc = new Set(cyc.forecast);
-  const runs = (test) => {
-    const out = [];
-    s.forEach((p, i) => { if (test(p)) { const last = out.at(-1); if (last && last[1] === i - 1) last[1] = i; else out.push([i, i]); } });
-    return out;
-  };
-  const cycleRow = runs(p => p.period).map(([a, b]) => `<rect x="${a * cw + 1}" y="2" width="${(b - a + 1) * cw - 2}" height="6" rx="3" fill="var(--per)"/>`).join('')
-    + runs(p => !p.logged && fc.has(p.date)).map(([a, b]) => `<rect x="${a * cw + 1}" y="2" width="${(b - a + 1) * cw - 2}" height="6" rx="3" fill="var(--per)" opacity=".35"/>`).join('');
-  const ps = s.map(p => p.pressure).filter(v => v != null);
-  const pmin = Math.min(...ps), pr = Math.max(Math.max(...ps) - pmin, 1);
-  const pts = s.map((p, i) => p.pressure == null || p.date > t ? null : `${i * cw + cw / 2},${26 - (p.pressure - pmin) / pr * 22}`).filter(Boolean).join(' ');
-  const axis = [1, 10, 20, n].map(d => `<text x="${Math.min((d - 1) * cw + cw / 2, W - 6)}" y="10" font-size="9" text-anchor="middle" fill="var(--faint)">${d}</text>`).join('');
-
-  const painDays = s.filter(p => p.headache);
+// The month as a readable log: newest day first, one row per day.
+function chronology(data, pr) {
+  const t = today();
+  const rows = data.series.filter(p => p.date <= t).reverse().map(p => {
+    const dt = parseISO(p.date);
+    const label = `${DOW[(dt.getDay() + 6) % 7].toLowerCase()} ${dt.getDate()}`;
+    const body = p.headache
+      ? `<span class="cbar"><i style="width:${p.intensity * 10}%;background:${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"></i></span><b class="cval">${p.intensity}</b>`
+      : `<span class="cnote">${p.logged ? 'без боли' : 'не заполнен'}</span>`;
+    const icons = `${pr.meds && p.meds ? '<i style="background:var(--med)"></i>' : ''}${pr.cycle && p.period ? '<i style="background:var(--per)"></i>' : ''}`;
+    const dp = p.pressure_delta;
+    return `<button class="crow ${p.logged ? '' : 'unlogged'}" data-open="${p.date}" aria-label="${fmtDate(p.date)}${p.headache ? `, сила ${p.intensity}` : p.logged ? ', без боли' : ', не заполнен'}">
+      <span class="cdate">${label}</span>${body}<span class="cicons">${icons}</span>
+      <span class="cpress ${dp != null && Math.abs(dp) >= 5 ? 'jump' : ''}">${dp != null ? `${dp > 0 ? '+' : ''}${Math.round(dp)}` : ''}</span></button>`;
+  }).join('');
+  const painDays = data.series.filter(p => p.headache);
+  const s = data.series;
   const withPeriod = painDays.filter(p => p.period).length;
-  const withJump = painDays.filter(p => Math.abs(p.pressure_delta ?? 0) >= 5
-    || Math.abs(s[s.indexOf(p) - 1]?.pressure_delta ?? 0) >= 5).length;
+  const withJump = painDays.filter(p => Math.abs(p.pressure_delta ?? 0) >= 5 || Math.abs(s[s.indexOf(p) - 1]?.pressure_delta ?? 0) >= 5).length;
   const insight = !painDays.length ? 'В этом месяце дней с болью нет.'
-    : `Из ${painDays.length} ${plural(painDays.length, 'дня', 'дней', 'дней')} с болью: ${withPeriod} — во время менструации, ${withJump} — при резкой смене давления (±5 гПа за сутки, в тот же или предыдущий день).`;
-
-  return `<div class="tracks">
-      <div class="tr"><span>Боль</span><svg viewBox="0 0 ${W} 40" role="img" aria-label="Сила боли по дням">${pain}</svg></div>
-      <div class="tr"><span>Лекарства</span><svg viewBox="0 0 ${W} 10" role="img" aria-label="Дни с лекарствами">${medsRow}</svg></div>
-      <div class="tr"><span>Цикл</span><svg viewBox="0 0 ${W} 10" role="img" aria-label="Менструация">${cycleRow}</svg></div>
-      <div class="tr"><span>Давление</span>${ps.length > 1 ? `<svg viewBox="0 0 ${W} 28" role="img" aria-label="Атмосферное давление"><polyline points="${pts}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linejoin="round"/></svg>` : '<span>укажите город в настройках</span>'}</div>
-      <div class="tr"><span></span><svg viewBox="0 0 ${W} 12">${axis}</svg></div>
-    </div>
-    <p class="insight">${insight}</p>`;
+    : `Из ${painDays.length} ${plural(painDays.length, 'дня', 'дней', 'дней')} с болью: ${pr.cycle ? `${withPeriod} — во время менструации, ` : ''}${withJump} — при резкой смене давления (±5 гПа за сутки).`;
+  return `<p class="insight" style="margin-top:0">${insight}</p>
+    <div class="legend" style="margin:0 0 8px">${pr.meds ? '<span><i style="background:var(--med)"></i>лекарства</span>' : ''}${pr.cycle ? '<span><i style="background:var(--per)"></i>менструация</span>' : ''}<span>справа — давление за сутки, гПа</span></div>
+    <div class="chrono">${rows}</div>`;
 }
 
 // ---------- attack mode ----------
@@ -718,13 +778,13 @@ function mapCard(title, items, kind, note) {
   if (!items.length) return '';
   return `<div class="card"><h2>${title}</h2><p class="muted">${note}</p>
     <div class="mapwrap">${factorMap(items, kind)}</div>
-    <table>${items.map(x => { const f = factorDef(x.factor); return `<tr><td>${f.icon} ${esc(f.label)} <span class="muted">(${x.days} дн)</span></td>
+    <table>${items.map(x => { const f = factorDef(x.factor); return `<tr><td>${f.icon} ${esc(f.label)}${x.lag ? ' <span class="muted">накануне</span>' : ''} <span class="muted">(${x.days} дн)</span></td>
       <td style="white-space:nowrap">боль в <b>${pct(x.p_with)}</b> дней<br><span class="muted">иначе ${pct(x.p_without)}</span></td></tr>`; }).join('')}</table></div>`;
 }
 
 async function renderData(days) {
   const to = today(), from = addDays(to, -(days - 1));
-  const s = await api.summary(from, to);
+  const [s, an] = await Promise.all([api.summary(from, to), api.analysis(from, to)]);
   const fa = s.factors;
   const triggers = fa.items.filter(x => x.kind === 'trigger');
   const protectors = fa.items.filter(x => x.kind === 'protector');
@@ -755,13 +815,16 @@ async function renderData(days) {
         <span class="sic">💊</span>
         <div class="sbody"><div class="cap">Лекарства</div>
           <div class="stat">Дней с обезболивающими: <b>${s.med_days}</b></div>
-          ${s.med_effect.map(m => `<div style="margin:10px 0 4px"><div class="spread"><span>${esc(m.name)} ${esc(m.dose)}</span><span class="muted">${m.count} раз</span></div>
-            <div class="bar"><i style="width:${m.full / m.count * 100}%;background:var(--none)"></i><i style="width:${m.partial / m.count * 100}%;background:var(--i1)"></i><i style="width:${m.none / m.count * 100}%;background:var(--i3)"></i></div>
-            <span class="muted">помогло ${m.full} · частично ${m.partial} · нет ${m.none}</span></div>`).join('')}
+          ${medBlock(an.meds)}
         </div>
       </div>
     </div>
     ${overuseBanner(s.overuse)}
+    ${riskCard(an.risk)}
+    ${monthlyCard(an.monthly)}
+    ${an.preventive.map(preventiveCard).join('')}
+    ${menstrualCard(an.menstrual)}
+    ${surveysCard(an.surveys)}
     ${!fa.ready ? `<div class="card"><h2>Карты факторов</h2>
         <p class="muted">Покажут, что связано с приступами, а что защищает. Появятся после ${fa.need} заполненных дней, надёжнее — после 90.</p>
         <div class="meter"><i style="width:${Math.min(fa.have / fa.need, 1) * 100}%"></i></div><p class="muted">${fa.have} из ${fa.need}</p></div>`
@@ -778,11 +841,97 @@ async function renderData(days) {
     <a class="btn primary wide" href="#report/${addDays(to, -89)}/${to}">Отчёт для врача</a>`;
 }
 
+function medBlock(list) {
+  if (!list.length) return '<p class="muted">Приёмов при приступах пока не было.</p>';
+  return list.map(m => {
+    const n = m.rated || 1;
+    return `<div style="margin:12px 0 4px"><div class="spread"><span>${esc(m.name)} ${esc(m.dose)}</span><span class="muted">${m.n} ${plural(m.n, 'приём', 'приёма', 'приёмов')}</span></div>
+      <div class="bar"><i style="width:${m.free / n * 100}%;background:var(--none)"></i><i style="width:${m.better / n * 100}%;background:var(--i1)"></i><i style="width:${m.none / n * 100}%;background:var(--i3)"></i></div>
+      <span class="muted">через 2 часа: прошло ${m.free} · легче ${m.better} · не помогло ${m.none}${m.n > m.rated ? ` · не отмечено ${m.n - m.rated}` : ''}</span>
+      ${m.median_delay != null ? `<br><span class="muted">обычно через ${fmtMinutes(m.median_delay)} от начала боли${m.early && m.late ? ` · в первый час помогло ${m.early.helped} из ${m.early.of}, позже — ${m.late.helped} из ${m.late.of}` : ''}</span>` : ''}</div>`;
+  }).join('');
+}
+
+const fmtMinutes = m => m < 60 ? `${m} мин` : `${Math.floor(m / 60)} ч${m % 60 ? ` ${m % 60} мин` : ''}`;
+const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+function monthlyCard(months) {
+  if (months.length < 2) return '';
+  return `<div class="card"><h2>По месяцам</h2>
+    <table><tr><th>Месяц</th><th>Боль</th><th>Мигрень</th><th>Обезбол.</th><th>Заполнено</th></tr>
+    ${months.map(m => `<tr><td>${MONTHS_SHORT[Number(m.month.slice(5)) - 1]}</td><td><b>${m.headache}</b></td><td>${m.migraine}</td><td>${m.med}</td><td class="muted">${m.logged}/${m.days}</td></tr>`).join('')}</table>
+    <p class="muted">Главные цифры для врача: дни с болью, дни мигрени и дни с обезболивающими в месяц.</p></div>`;
+}
+
+function preventiveCard(p) {
+  if (!p) return '';
+  const verdict = p.change == null ? 'Нужно больше данных: от 20 заполненных дней до начала и после первого месяца.'
+    : p.responder ? 'Дней с болью стало вдвое меньше и больше — так обычно выглядит хороший ответ на лечение.'
+    : p.change < 0 ? 'Дней с болью стало меньше, но меньше чем вдвое.' : 'Дней с болью не стало меньше — стоит обсудить с врачом.';
+  return `<div class="card"><h2>Профилактика: ${esc(p.name)}</h2>
+    <p class="muted">с ${fmtDate(p.start)}${p.stop ? ` по ${fmtDate(p.stop)}` : ''}</p>
+    <p>Дней с болью на 30 дней до начала: <b>${p.before?.per30 ?? '—'}</b></p>
+    <p>После первого месяца: <b>${p.after?.per30 ?? '—'}</b>${p.change != null ? ` <span class="muted">(${p.change > 0 ? '+' : ''}${p.change}%)</span>` : ''}</p>
+    <p class="muted">${verdict}</p></div>`;
+}
+
+function menstrualCard(mw) {
+  if (!mw || !mw.cycles) return '';
+  return `<div class="card"><h2>Менструальная мигрень</h2>
+    <p>Приступ в дни −2…+3 от начала менструации: <b>${mw.with_attack} из ${mw.cycles}</b> ${plural(mw.cycles, 'цикла', 'циклов', 'циклов')}</p>
+    <p class="muted">${mw.likely ? 'Похоже на менструально-связанную мигрень: приступы в этом окне в двух циклах из трёх и чаще. Расскажите врачу — для неё есть отдельные схемы лечения.'
+      : mw.cycles < 3 ? 'Для вывода нужно хотя бы 3 отмеченных цикла.' : 'Явной связи приступов с началом менструации пока не видно.'}</p></div>`;
+}
+
+function surveysCard(sv) {
+  const row = (t, title, last) => `<div class="spread" style="padding:8px 0;border-top:1px solid var(--line)">
+    <span>${title}<br><span class="muted">${last ? `${last.score} — ${last.grade}, ${fmtDate(last.date)}` : 'ещё не проходили'}</span></span>
+    <a class="btn ${sv.due[t] ? 'primary' : ''}" href="#survey/${t}">${last ? 'Пройти снова' : 'Пройти'}</a></div>`;
+  return `<div class="card"><h2>Опросники</h2>
+    <p class="muted">Стандартные шкалы, которые понимает любой невролог. HIT-6 — раз в месяц, MIDAS — раз в 3 месяца.</p>
+    ${row('hit6', 'HIT-6 · влияние на жизнь', sv.hit6)}${row('midas', 'MIDAS · потерянные дни', sv.midas)}</div>`;
+}
+
+// ---------- questionnaires ----------
+
+let surveyAnswers = [];
+
+async function renderSurvey(type) {
+  const def = api.SURVEYS[type];
+  if (!def) { location.hash = '#data'; return; }
+  surveyAnswers = new Array(def.questions.length).fill(null);
+  const draw = () => {
+    $view.innerHTML = `
+      <div class="wiz-top"><button class="x" onclick="history.back()" aria-label="Закрыть">✕</button></div>
+      <h1>${def.title}</h1><p class="wiz-sub">${def.subtitle}</p>
+      ${def.questions.map((q, i) => `<div class="card"><p style="margin-top:0">${i + 1}. ${q}</p>
+        ${def.options ? `<div class="pills">${def.options.map(([t, v]) => `<button class="pill ${surveyAnswers[i] === v ? 'on' : ''}" data-q="${i}" data-v="${v}">${t}</button>`).join('')}</div>`
+        : `<div class="stepper" style="justify-content:flex-start"><button data-q="${i}" data-d="-1" aria-label="Меньше">−</button><b>${surveyAnswers[i] ?? 0}</b><button data-q="${i}" data-d="1" aria-label="Больше">+</button><span class="muted" style="margin-left:6px">дней</span></div>`}</div>`).join('')}
+      <button class="primary wide" id="surveySave" style="padding:15px">Сохранить</button>`;
+    $view.querySelectorAll('[data-q]').forEach(b => b.onclick = () => {
+      const i = Number(b.dataset.q);
+      if (b.dataset.v) surveyAnswers[i] = Number(b.dataset.v);
+      else surveyAnswers[i] = Math.min(Math.max((surveyAnswers[i] ?? 0) + Number(b.dataset.d), 0), 92);
+      const y = window.scrollY; draw(); window.scrollTo(0, y);
+    });
+    document.getElementById('surveySave').onclick = async () => {
+      if (!def.options) surveyAnswers = surveyAnswers.map(v => v ?? 0);
+      try {
+        const r = await api.saveSurvey(type, surveyAnswers);
+        toast(`${def.title}: ${r.score} — ${r.grade}`);
+        location.hash = '#data';
+      } catch (err) { toast(err.message); }
+    };
+  };
+  draw();
+}
+
 // ---------- report ----------
 
 async function renderReport(from, to) {
   to = to || today(); from = from || addDays(to, -89);
-  const s = await api.summary(from, to);
+  const [s, an] = await Promise.all([api.summary(from, to), api.analysis(from, to)]);
+  const pr = an.profile || {};
   const dur = a => {
     if (!a.start_time || !a.end_time) return '—';
     let m = (Number(a.end_time.slice(0, 2)) * 60 + Number(a.end_time.slice(3))) - (Number(a.start_time.slice(0, 2)) * 60 + Number(a.start_time.slice(3)));
@@ -800,6 +949,7 @@ async function renderReport(from, to) {
     </div>
     <div class="report">
       <h1>Дневник головной боли</h1>
+      ${pr.birth_year || pr.diagnosis || pr.since || pr.doctor ? `<p>${[pr.birth_year && `Год рождения: ${esc(pr.birth_year)}`, pr.diagnosis && `Диагноз: ${esc(pr.diagnosis)}`, pr.since && `Головные боли с ${esc(pr.since)}`, pr.doctor && `Врач: ${esc(pr.doctor)}`].filter(Boolean).join(' · ')}</p>` : ''}
       <p>Период: ${fmtDateFull(from)} — ${fmtDateFull(to)} (${s.total_days} дн, заполнено ${s.logged_days})</p>
       <div class="card"><h2>Сводка</h2><table>
         <tr><td>Дней с головной болью</td><td><b>${s.headache_days}</b> (${pct(s.headache_days / s.total_days)} периода), из них похожих на мигрень: <b>${s.migraine_days}</b></td></tr>
@@ -811,25 +961,31 @@ async function renderReport(from, to) {
         <tr><td>Сопутствующие симптомы</td><td>${s.symptoms.map(([k, n]) => `${L.symptoms[k]?.[0] || k} ${n}`).join(', ') || '—'}</td></tr>
       </table></div>
       ${overuseBanner(s.overuse)}
+      ${monthlyCard(an.monthly)}
+      ${an.surveys.hit6 || an.surveys.midas ? `<div class="card"><h2>Опросники</h2><table>
+        ${[['hit6', 'HIT-6'], ['midas', 'MIDAS']].map(([t, n]) => an.surveys.list.filter(x => x.type === t).slice(-3).map(x => `<tr><td>${n}</td><td>${fmtDate(x.date)}</td><td><b>${x.score}</b> — ${x.grade}</td></tr>`).join('')).join('')}
+      </table></div>` : ''}
+      ${an.preventive.map(preventiveCard).join('')}
+      ${menstrualCard(an.menstrual)}
       <div class="card"><h2>Календарь</h2>
         <div class="strip">${s.series.map(p => `<i class="${p.type ? 't-' + p.type : ''}" title="${fmtDate(p.date)}"></i>`).join('')}</div>
         <div class="legend"><span><i style="background:var(--none)"></i>без боли</span><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span><span><i style="background:var(--surface-2)"></i>нет записи</span></div>
       </div>
-      ${s.med_effect.length ? `<div class="card"><h2>Препараты</h2><table>
-        <tr><th>Препарат</th><th>Приёмов</th><th>Помогло</th><th>Частично</th><th>Нет</th></tr>
-        ${s.med_effect.map(m => `<tr><td>${esc(m.name)} ${esc(m.dose)}</td><td>${m.count}</td><td>${m.full}</td><td>${m.partial}</td><td>${m.none}</td></tr>`).join('')}
+      ${an.meds.length ? `<div class="card"><h2>Препараты при приступе</h2><table>
+        <tr><th>Препарат</th><th>Приёмов</th><th>Через 2 ч: прошло / легче / нет</th><th>Обычно через</th></tr>
+        ${an.meds.map(m => `<tr><td>${esc(m.name)} ${esc(m.dose)}<br><span class="muted">${L.kinds[m.kind]}</span></td><td>${m.n}</td><td>${m.free} / ${m.better} / ${m.none}${m.n > m.rated ? ` <span class="muted">(не отмечено ${m.n - m.rated})</span>` : ''}</td><td>${m.median_delay != null ? fmtMinutes(m.median_delay) : '—'}</td></tr>`).join('')}
       </table></div>` : ''}
       ${fl.length ? `<div class="card"><h2>Возможные провокаторы и защитные факторы</h2><table>
         <tr><th>Фактор</th><th>Дней</th><th>Боль в такие дни</th><th>В остальные</th></tr>
-        ${fl.map(x => `<tr><td>${x.kind === 'trigger' ? '↑' : '↓'} ${esc(factorDef(x.factor).label)}</td><td>${x.days}</td><td>${pct(x.p_with)}</td><td>${pct(x.p_without)}</td></tr>`).join('')}
+        ${fl.map(x => `<tr><td>${x.kind === 'trigger' ? '↑' : '↓'} ${esc(factorDef(x.factor).label)}${x.lag ? ' (накануне)' : ''}</td><td>${x.days}</td><td>${pct(x.p_with)}</td><td>${pct(x.p_without)}</td></tr>`).join('')}
       </table></div>` : ''}
       <div class="card"><h2>Приступы</h2>
       ${s.attacks.length ? `<table>
         <tr><th>Дата</th><th>Время</th><th>Длит.</th><th>Сила</th><th>Описание</th><th>Лекарства</th></tr>
         ${s.attacks.map(a => `<tr>
-          <td>${fmtDate(a.date)}${a.migraine ? '<br><i>мигренеподобный</i>' : ''}</td><td>${a.start_time || '—'}${a.end_time ? '–' + a.end_time : ''}</td><td>${dur(a)}</td><td>${a.intensity}</td>
+          <td>${fmtDate(a.date)}${a.migraine ? '<br><i>мигренеподобный</i>' : ''}</td><td>${a.start_time || '—'}${a.end_time ? '–' + a.end_time : ''}</td><td>${dur(a)}</td><td>${a.intensity}${a.disability != null ? `<br><span class="muted">${L.disability[a.disability].toLowerCase()}</span>` : ''}${a.recurred ? '<br><span class="muted">вернулась</span>' : ''}</td>
           <td>${esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character), labelsOf(L.symptoms, a.symptoms)].filter(Boolean).join('; '))}${a.note ? `<br><i>${esc(a.note)}</i>` : ''}</td>
-          <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? m.name + ' ' + m.dose : '?')}${x.time ? ' в ' + x.time : ''} — ${L.effects[x.effect] || 'эффект не отмечен'}`; }).join('<br>') || '—'}</td>
+          <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? m.name + ' ' + m.dose : '?')}${x.time ? ' в ' + x.time : ''} — ${x.effect ? `через 2 ч: ${L.effects[x.effect].toLowerCase()}` : 'эффект не отмечен'}`; }).join('<br>') || '—'}</td>
         </tr>`).join('')}
       </table>` : '<p class="muted">Приступов за период нет.</p>'}</div>
       <p class="muted">Сформировано ${fmtDateFull(today())}. Данные заполнены пациентом. «Мигренеподобный» — по признакам приступа (ICHD-3), связи с факторами — статистические совпадения; это не диагноз.</p>
@@ -878,7 +1034,7 @@ async function renderSettings() {
   const [s, list] = await Promise.all([api.settings(), api.meds(), prepareBackup()]);
   CFG = await api.config();
   const aiDays = Number(pref.get('ai_days', 90));
-  let prompt = await api.aiPrompt(addDays(today(), -(aiDays - 1)), today());
+  let aiText = await api.aiPrompt(addDays(today(), -(aiDays - 1)), today());
   meds = list;
   const csv = await api.csv();
   $view.innerHTML = `
@@ -891,6 +1047,17 @@ async function renderSettings() {
         <input type="range" class="plain" id="bright" min="0.5" max="1" step="0.05" value="${1 - Number(pref.get('dim', 0))}" aria-label="Яркость приложения"></label>
       <p class="muted">Если свет раздражает, сдвиньте влево. Тёмные темы удобнее вечером и во время приступа.</p>
     </div>
+    <h3>Профиль</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">Попадает в отчёт для врача и в запрос для ИИ. Всё необязательно.</p>
+      <div class="row" style="flex-wrap:nowrap">
+        <label class="field" style="flex:1"><span>Год рождения</span><input id="pBirth" inputmode="numeric" maxlength="4" value="${esc(s.profile.birth_year || '')}"></label>
+        <label class="field" style="flex:1"><span>Болит голова с (год)</span><input id="pSince" inputmode="numeric" maxlength="4" value="${esc(s.profile.since || '')}"></label>
+      </div>
+      <label class="field"><span>Диагноз, если ставили</span><input id="pDiag" maxlength="80" placeholder="Например, мигрень без ауры" value="${esc(s.profile.diagnosis || '')}"></label>
+      <label class="field" style="margin-bottom:0"><span>Врач</span><input id="pDoc" maxlength="80" placeholder="Невролог, клиника" value="${esc(s.profile.doctor || '')}"></label>
+    </div>
+
     <h3>Разделы дневника</h3>
     <div class="list">${CFG.modules.map(m => `
       <details class="mod">
@@ -914,7 +1081,11 @@ async function renderSettings() {
 
     <h3>Мои лекарства</h3>
     <div class="list">${meds.filter(m => !m.deleted).map(m => `
-      <div class="frow"><span class="fic">💊</span><div class="fbody"><div class="flabel">${esc(m.name)} ${esc(m.dose)}</div><div class="fval">${L.kinds[m.kind]}</div></div>
+      <div class="frow"><span class="fic">💊</span><div class="fbody"><div class="flabel">${esc(m.name)} ${esc(m.dose)}</div>
+        <div class="fval">${L.kinds[m.kind]}${m.kind === 'preventive' && m.start_date ? ` · с ${fmtDate(m.start_date)}${m.stop_date ? ` по ${fmtDate(m.stop_date)}` : ''}` : ''}</div>
+        ${m.kind === 'preventive' ? `<div class="row" style="flex-wrap:nowrap;margin-top:8px">
+          <label class="field" style="flex:1;margin:0"><span>Начала</span><input type="date" data-prev-start="${m.id}" value="${m.start_date || ''}" max="${today()}"></label>
+          <label class="field" style="flex:1;margin:0"><span>Закончила</span><input type="date" data-prev-stop="${m.id}" value="${m.stop_date || ''}" max="${today()}"></label></div>` : ''}</div>
         <button class="ghost danger" data-med-del="${m.id}">Удалить</button></div>`).join('') || '<div class="frow muted">Пока пусто</div>'}
     </div>
     <div class="card" style="margin-top:10px">
@@ -923,7 +1094,7 @@ async function renderSettings() {
         <input id="mDose" placeholder="Доза, 50 мг" maxlength="40" style="flex:1;min-width:0">
         <select id="mKind" style="flex:1;min-width:0">${Object.entries(L.kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>
       </div>
-      <p class="muted">Тип нужен, чтобы считать риск злоупотребления обезболивающими.</p>
+      <p class="muted">Тип нужен, чтобы считать риск злоупотребления обезболивающими. Для профилактики укажите дату начала — дневник покажет, сколько стало дней с болью до и после.</p>
       <button class="primary wide" id="mAdd">Добавить лекарство</button>
     </div>
 
@@ -932,6 +1103,29 @@ async function renderSettings() {
       <p class="muted" style="margin-top:0">${s.city ? `Город: <b style="color:var(--text)">${esc(s.city.name)}</b>, ${esc(s.city.region)}` : 'Город не выбран — давление и температура не подтягиваются.'}</p>
       <div class="row" style="flex-wrap:nowrap"><input id="cityQ" placeholder="Найти город" style="flex:1;min-width:0"><button id="citySearch">Найти</button></div>
       <div id="cityResults" class="pills" style="margin-top:8px"></div>
+    </div>
+
+    <h3>Цикл</h3>
+    <div class="list">
+      <div class="frow"><div class="fbody"><div class="flabel">Отмечать менструальный цикл</div><div class="fval">прогноз, день цикла, менструальная мигрень</div></div>
+        <button class="switch ${s.track_cycle ? 'on' : ''}" id="trackCycle" role="switch" aria-label="Отмечать менструальный цикл"></button></div>
+      ${s.track_cycle ? `<div class="frow"><div class="fbody"><div class="flabel">Длина цикла, дней</div><div class="fval">если пусто — дневник посчитает сам</div></div>
+        <input id="cycleLen" type="number" inputmode="numeric" min="20" max="45" style="width:80px" value="${s.cycle_len ?? ''}"></div>` : ''}
+    </div>
+
+    <h3>Код-пароль</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">${s.has_pin ? 'Код включён: дневник спрашивает его при открытии и после 5 минут в фоне.' : 'Чтобы дневник не открыл кто-то другой, взяв телефон.'} Код скрывает записи, но не шифрует их.</p>
+      <div class="row" style="flex-wrap:nowrap"><input id="pinNew" type="password" inputmode="numeric" maxlength="4" placeholder="4 цифры" style="flex:1;min-width:0" autocomplete="off">
+        <button id="pinSet">${s.has_pin ? 'Сменить' : 'Включить'}</button></div>
+      ${s.has_pin ? '<button class="ghost danger wide" id="pinOff" style="margin-top:8px">Выключить код</button>' : ''}
+    </div>
+
+    <h3>Режим приступа</h3>
+    <div class="card">
+      <label class="field" style="margin-top:0"><span>Насколько приглушать экран</span>
+        <input type="range" class="plain" id="attackDim" min="0" max="0.5" step="0.05" value="${pref.get('attack_dim', 0.2)}" aria-label="Приглушение экрана в режиме приступа"></label>
+      <p class="muted">Вправо — темнее. Действует только в режиме «Болит сейчас».</p>
     </div>
 
     <h3>Резервная копия</h3>
@@ -967,6 +1161,12 @@ async function renderSettings() {
     <h3>Экспорт</h3>
     <div class="card">
       <button id="exportCsv" class="wide">Скачать всё в CSV (Excel)</button>
+    </div>
+
+    <h3>Удаление</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">Удаляет все записи, лекарства и настройки на этом телефоне. Сначала сохраните резервную копию.</p>
+      <button class="ghost danger wide" id="wipe">Удалить все данные</button>
     </div>`;
 
   const $ = id => document.getElementById(id);
@@ -1035,13 +1235,39 @@ async function renderSettings() {
       $view.querySelector(`[data-add-factor="${mod}"]`).closest('details').open = true;
     } catch (err) { toast(err.message); }
   });
+  const saveProfile = () => api.saveProfile({ birth_year: $('pBirth').value, since: $('pSince').value, diagnosis: $('pDiag').value, doctor: $('pDoc').value }).then(() => toast('Сохранено'));
+  ['pBirth', 'pSince', 'pDiag', 'pDoc'].forEach(id => { $(id).onchange = saveProfile; });
+  $view.querySelectorAll('[data-prev-start],[data-prev-stop]').forEach(inp => inp.onchange = async () => {
+    const m = medById(Number(inp.dataset.prevStart || inp.dataset.prevStop));
+    await api.updateMed(m.id, { ...m, [inp.dataset.prevStart ? 'start_date' : 'stop_date']: inp.value || null });
+    meds = await api.meds();
+    toast('Сохранено');
+  });
+  $('trackCycle').onclick = async () => { await api.saveCycleSettings({ track_cycle: !s.track_cycle }); CFG = await api.config(); renderSettings(); };
+  if ($('cycleLen')) $('cycleLen').onchange = async () => { await api.saveCycleSettings({ cycle_len: $('cycleLen').value || null }); toast('Сохранено'); };
+  $('pinSet').onclick = async () => {
+    try { await api.setPin($('pinNew').value); unlocked = true; toast('Код сохранён'); renderSettings(); } catch (err) { toast(err.message); }
+  };
+  if ($('pinOff')) $('pinOff').onclick = async () => { await api.setPin(null); toast('Код выключен'); renderSettings(); };
+  $('attackDim').oninput = e => pref.set('attack_dim', e.target.value);
+  $('wipe').onclick = async () => {
+    if (!confirm('Удалить все записи, лекарства и настройки на этом телефоне?')) return;
+    if (prompt('Это нельзя отменить. Напишите «удалить», чтобы подтвердить.')?.trim().toLowerCase() !== 'удалить') return toast('Отменено');
+    await api.deleteAll();
+    ['theme', 'dim', 'attack_dim', 'cal_view', 'cal_meds', 'cal_cycle', 'ai_days', 'install_hint_hidden'].forEach(k => pref.del(k));
+    applyTheme('moss');
+    applyDim();
+    CFG = null;
+    toast('Все данные удалены');
+    location.hash = '#diary';
+  };
   $('aiDays').onchange = async () => {
     pref.set('ai_days', $('aiDays').value);
     const n = Number($('aiDays').value);
-    prompt = await api.aiPrompt(addDays(today(), -(n - 1)), today());
+    aiText = await api.aiPrompt(addDays(today(), -(n - 1)), today());
   };
   $('aiCopy').onclick = async () => {
-    try { await navigator.clipboard.writeText(prompt); toast('Скопировано — вставьте в чат с ИИ'); } catch { toast('Не удалось скопировать'); }
+    try { await navigator.clipboard.writeText(aiText); toast('Скопировано — вставьте в чат с ИИ'); } catch { toast('Не удалось скопировать'); }
   };
   $('backup').onclick = () => saveBackup().catch(err => toast(err.message));
   $('restoreBtn').onclick = () => $('restoreFile').click();

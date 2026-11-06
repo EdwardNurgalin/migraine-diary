@@ -78,7 +78,7 @@ const daysBetween = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000)
  * Menstrual cycle from the days marked "менструация": period starts, average cycle and period length,
  * and a forecast of the next period. The forecast needs at least one full cycle of plausible length.
  */
-export function cycle(days) {
+export function cycle(days, manualLen = null) {
   const marked = days.filter(d => d.period).map(d => d.date).sort();
   const periods = [];
   for (const date of marked) {
@@ -93,7 +93,8 @@ export function cycle(days) {
     if (len >= 20 && len <= 45) lengths.push(len);
   }
   const avg = xs => xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : null;
-  const cycleLen = avg(lengths);
+  // A cycle length entered in Settings wins: it allows a forecast from a single marked period.
+  const cycleLen = manualLen || avg(lengths);
   const periodLen = avg(periods.map(p => daysBetween(p.start, p.end) + 1));
   let forecast = [];
   if (cycleLen && periods.length) {
@@ -194,8 +195,9 @@ export function summary({ from, to, days, weather, health, meds, factors = FACTO
 }
 
 /**
- * Compare how often the head hurts on days with vs. without each factor.
- * A factor counts only on days where it was answered (missing key = unknown, not "no").
+ * Compare how often the head hurts on days with vs. without each factor, on the same day and the day after
+ * ("накануне"): many triggers act with a delay. A factor counts only on days where it was answered.
+ * For each factor the stronger of the two associations is reported.
  */
 function factorAnalysis(logged, series, defs) {
   if (logged.length < MIN_DAYS_FOR_FACTORS) {
@@ -217,26 +219,221 @@ function factorAnalysis(logged, series, defs) {
     if (p.sleep != null) mark('sleep_short', p.date, p.sleep < 6);
   }
 
+  const loggedDates = new Set(logged.map(d => d.date));
   const headache = new Set(logged.filter(d => d.headache).map(d => d.date));
+  const compare = (withDays, withoutDays) => {
+    if (withDays.length < MIN_FACTOR_DAYS || withoutDays.length < MIN_FACTOR_DAYS) return null;
+    const pWith = withDays.filter(d => headache.has(d)).length / withDays.length;
+    const pWithout = withoutDays.filter(d => headache.has(d)).length / withoutDays.length;
+    const ratio = pWithout ? pWith / pWithout : (pWith ? null : 1);
+    return { days: withDays.length, pWith, pWithout, ratio };
+  };
+  const strength = r => r.ratio == null ? Infinity : Math.abs(Math.log(Math.max(r.ratio, 0.01)));
+
   const items = [];
   for (const [f, base] of Object.entries(answered)) {
-    const withF = exposed[f];
-    const withoutF = [...base].filter(d => !withF.has(d));
-    if (withF.size < MIN_FACTOR_DAYS || withoutF.length < MIN_FACTOR_DAYS) continue;
-    const pWith = [...withF].filter(d => headache.has(d)).length / withF.size;
-    const pWithout = withoutF.filter(d => headache.has(d)).length / withoutF.length;
-    const ratio = pWithout ? pWith / pWithout : (pWith ? null : 1);
+    const on = exposed[f];
+    const same = compare([...on], [...base].filter(d => !on.has(d)));
+    // Factor on day D-1, outcome on day D (both days logged).
+    const next = d => addDays(d, 1);
+    const lagged = compare(
+      [...on].filter(d => loggedDates.has(next(d))).map(next),
+      [...base].filter(d => !on.has(d) && loggedDates.has(next(d))).map(next));
+    // Same day by default. The day-after link is used only for triggers, and only when it is stronger:
+    // delayed effects are typical for triggers (alcohol, short sleep), while choosing the stronger of two
+    // lags for everything would turn repeating patterns into false triggers.
+    const isTrigger = r => r && (r.ratio == null || r.ratio >= TRIGGER_RATIO);
+    const best = isTrigger(lagged) && (!same || (same.ratio != null && same.ratio < TRIGGER_RATIO && same.ratio > PROTECTOR_RATIO) || (isTrigger(same) && strength(lagged) > strength(same)))
+      ? { ...lagged, lag: 1 } : same ? { ...same, lag: 0 } : null;
+    if (!best) continue;
     items.push({
       factor: f,
-      days: withF.size,
-      p_with: Math.round(pWith * 100) / 100,
-      p_without: Math.round(pWithout * 100) / 100,
-      ratio: ratio == null ? null : Math.round(ratio * 100) / 100,
-      kind: ratio == null || ratio >= TRIGGER_RATIO ? 'trigger' : ratio <= PROTECTOR_RATIO ? 'protector' : 'neutral',
+      lag: best.lag,
+      days: best.days,
+      p_with: Math.round(best.pWith * 100) / 100,
+      p_without: Math.round(best.pWithout * 100) / 100,
+      ratio: best.ratio == null ? null : Math.round(best.ratio * 100) / 100,
+      kind: best.ratio == null || best.ratio >= TRIGGER_RATIO ? 'trigger' : best.ratio <= PROTECTOR_RATIO ? 'protector' : 'neutral',
     });
   }
   // No ratio means the head never hurt without the factor: the strongest association, so it goes first.
   const r = x => x.ratio ?? Infinity;
   items.sort((a, b) => r(a) === r(b) ? 0 : r(b) > r(a) ? 1 : -1);
   return { ready: true, have: logged.length, preliminary: logged.length < 90, items };
+}
+
+/** Key clinical numbers per calendar month: headache, migraine and acute-medication days, scaled to 30 days. */
+export function monthly(days, medsById, from, to) {
+  const months = new Map();
+  for (const date of dateRange(from, to)) {
+    const k = date.slice(0, 7);
+    if (!months.has(k)) months.set(k, { month: k, days: 0, logged: 0, headache: 0, migraine: 0, med: 0 });
+    months.get(k).days++;
+  }
+  for (const d of days) {
+    const m = months.get(d.date.slice(0, 7));
+    if (!m || d.date < from || d.date > to) continue;
+    m.logged++;
+    if (d.headache) m.headache++;
+    if (d.attacks.some(isMigraine)) m.migraine++;
+    if (allDoses(d).some(x => ACUTE_KINDS.has(medsById.get(x.med_id)?.kind))) m.med++;
+  }
+  return [...months.values()].map(m => ({ ...m, headache_per30: m.logged ? Math.round(m.headache / m.logged * 30 * 10) / 10 : null }));
+}
+
+/**
+ * Menstrually related migraine (ICHD-3 appendix A1.1): attacks starting from day −2 to day +3 of menstruation
+ * in at least two of three cycles. Returns how many cycles had an attack in that window.
+ */
+export function menstrualWindow(days, cyc) {
+  const pain = new Set(days.filter(d => d.headache).map(d => d.date));
+  const logged = new Set(days.map(d => d.date));
+  const cycles = cyc.periods.map(p => {
+    const window = Array.from({ length: 6 }, (_, i) => addDays(p.start, i - 2));
+    return { start: p.start, observed: window.filter(d => logged.has(d)).length >= 4, attack: window.some(d => pain.has(d)) };
+  }).filter(c => c.observed);
+  const painDays = [...pain];
+  const inWindow = painDays.filter(d => cyc.periods.some(p => d >= addDays(p.start, -2) && d <= addDays(p.start, 3))).length;
+  return {
+    cycles: cycles.length,
+    with_attack: cycles.filter(c => c.attack).length,
+    pain_days: painDays.length,
+    pain_in_window: inWindow,
+    likely: cycles.length >= 3 && cycles.filter(c => c.attack).length / cycles.length >= 2 / 3,
+  };
+}
+
+const toMin = t => t ? +t.slice(0, 2) * 60 + +t.slice(3, 5) : null;
+const median = xs => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+
+/**
+ * Acute treatment: share of doses after which the pain was gone / better / unchanged two hours later,
+ * the typical delay from the start of the attack, and whether taking it early (within an hour) worked better.
+ */
+export function medEfficacy(days, medsById) {
+  const by = new Map();
+  for (const d of days) for (const a of d.attacks) for (const x of a.doses) {
+    const m = medsById.get(x.med_id);
+    if (!m || m.kind === 'preventive') continue;
+    if (!by.has(m.id)) by.set(m.id, { name: m.name, dose: m.dose, kind: m.kind, n: 0, rated: 0, free: 0, better: 0, none: 0, delays: [], early: [0, 0], late: [0, 0] });
+    const e = by.get(m.id);
+    e.n++;
+    let delay = toMin(x.time) != null && toMin(a.start_time) != null ? toMin(x.time) - toMin(a.start_time) : null;
+    if (delay != null && delay < 0) delay += 1440;
+    if (delay != null) e.delays.push(delay);
+    if (!x.effect) continue;
+    e.rated++;
+    e[{ full: 'free', partial: 'better', none: 'none' }[x.effect]]++;
+    const helped = x.effect !== 'none' ? 1 : 0;
+    if (delay != null) { const g = delay <= 60 ? e.early : e.late; g[0] += helped; g[1]++; }
+  }
+  return [...by.values()].map(e => ({
+    name: e.name, dose: e.dose, kind: e.kind, n: e.n, rated: e.rated, free: e.free, better: e.better, none: e.none,
+    median_delay: median(e.delays),
+    early: e.early[1] ? { helped: e.early[0], of: e.early[1] } : null,
+    late: e.late[1] ? { helped: e.late[0], of: e.late[1] } : null,
+  })).sort((a, b) => b.n - a.n);
+}
+
+/**
+ * Preventive treatment: headache days per 30 logged days in the 90 days before the start
+ * versus from day 31 after the start (the first month is usually too early to judge).
+ * A drop of at least 50% is the usual definition of a good response.
+ */
+export function preventiveResponse(days, med) {
+  if (!med.start_date) return null;
+  const rate = (from, to) => {
+    const ds = days.filter(d => d.date >= from && d.date <= to);
+    return ds.length >= 20 ? { logged: ds.length, per30: Math.round(ds.filter(d => d.headache).length / ds.length * 30 * 10) / 10 } : null;
+  };
+  const before = rate(addDays(med.start_date, -90), addDays(med.start_date, -1));
+  const after = rate(addDays(med.start_date, 30), med.stop_date || today());
+  const change = before && after && before.per30 ? Math.round((after.per30 - before.per30) / before.per30 * 100) : null;
+  return { name: med.name, dose: med.dose, start: med.start_date, stop: med.stop_date || null, before, after, change, responder: change != null && change <= -50 };
+}
+
+// ---------- risk for tomorrow ----------
+
+const RISK_REASONS = {
+  period: ['ожидается менструация', 'Держите лекарство под рукой и примите его при первых признаках боли.'],
+  pressure: ['перепад атмосферного давления', 'Пейте воду, не пропускайте еду, планируйте спокойный день.'],
+  sleep: ['мало сна', 'Постарайтесь лечь вовремя.'],
+  prodrome: ['есть ранние сигналы', 'При первых признаках боли не откладывайте лекарство.'],
+  alcohol: ['был алкоголь', 'Пейте больше воды вечером.'],
+  stress: ['сильный стресс', 'Запланируйте отдых: после стресса приступ часто начинается в выходной.'],
+  pain: ['сегодня болела голова', 'Если боль вернётся, отметьте это — так видно повторные приступы.'],
+};
+
+function riskFeatures(day, nextDate, inWindow, weatherNext, defs) {
+  const f = day?.factors || {};
+  const prodrome = Object.entries(f).filter(([k, v]) => defs[k]?.module === 'prodrome' && v).length;
+  return {
+    period: inWindow(nextDate) ? 1 : 0,
+    pressure: Math.abs(weatherNext?.pressure_delta ?? 0) >= 5 ? 1 : 0,
+    sleep: day?.sleep_hours != null && day.sleep_hours < 6 || (f.sleep_bad ?? 0) >= 2 ? 1 : 0,
+    prodrome: prodrome >= 2 ? 1 : 0,
+    alcohol: (f.alcohol ?? 0) >= 1 ? 1 : 0,
+    stress: (f.stress ?? 0) >= 2 ? 1 : 0,
+    pain: day?.headache ? 1 : 0,
+  };
+}
+
+const sigmoid = z => 1 / (1 + Math.exp(-z));
+
+function fitLogistic(X, y, iters = 400, lr = 0.3, l2 = 0.05) {
+  const k = X[0].length;
+  const w = new Array(k + 1).fill(0);
+  for (let it = 0; it < iters; it++) {
+    const g = new Array(k + 1).fill(0);
+    X.forEach((x, i) => {
+      const err = sigmoid(w[0] + x.reduce((s, v, j) => s + v * w[j + 1], 0)) - y[i];
+      g[0] += err;
+      x.forEach((v, j) => { g[j + 1] += err * v; });
+    });
+    for (let j = 0; j <= k; j++) w[j] -= lr * (g[j] / X.length + (j ? l2 * w[j] : 0));
+  }
+  return x => sigmoid(w[0] + x.reduce((s, v, j) => s + v * w[j + 1], 0));
+}
+
+function auc(scores, y) {
+  const pos = scores.filter((_, i) => y[i]), neg = scores.filter((_, i) => !y[i]);
+  if (!pos.length || !neg.length) return null;
+  let wins = 0;
+  for (const p of pos) for (const n of neg) wins += p > n ? 1 : p === n ? 0.5 : 0;
+  return Math.round(wins / (pos.length * neg.length) * 100) / 100;
+}
+
+/**
+ * Risk of a headache tomorrow. Simple rules at first; with 60+ pairs of consecutive logged days
+ * a personal logistic model is trained, checked on the most recent quarter of the data, and used only
+ * if it beats chance (AUC ≥ 0.6). The honest accuracy is returned with the result.
+ */
+export function riskTomorrow({ days, cyc, weather, defs, date = today() }) {
+  const byDate = new Map(days.map(d => [d.date, d]));
+  const starts = [...cyc.periods.map(p => p.start), ...(cyc.forecast.length ? [cyc.forecast[0]] : [])];
+  const inWindow = d => starts.some(s => d >= addDays(s, -2) && d <= addDays(s, 3));
+  const keys = Object.keys(RISK_REASONS);
+  const tomorrow = addDays(date, 1);
+  const feats = riskFeatures(byDate.get(date), tomorrow, inWindow, weather[tomorrow], defs);
+  const reasons = keys.filter(k => feats[k]).map(k => ({ key: k, text: RISK_REASONS[k][0], tip: RISK_REASONS[k][1] }));
+
+  const pairs = days.filter(d => byDate.has(addDays(d.date, 1)) && d.date < date).sort((a, b) => a.date.localeCompare(b.date));
+  const X = pairs.map(d => keys.map(k => riskFeatures(d, addDays(d.date, 1), inWindow, weather[addDays(d.date, 1)], defs)[k]));
+  const y = pairs.map(d => byDate.get(addDays(d.date, 1)).headache ? 1 : 0);
+  const positives = y.filter(Boolean).length;
+  let model = { ready: false, need: 60, have: pairs.length };
+  if (pairs.length >= 60 && positives >= 8 && pairs.length - positives >= 8) {
+    const cut = Math.floor(pairs.length * 0.75);
+    const test = fitLogistic(X.slice(0, cut), y.slice(0, cut));
+    const score = auc(X.slice(cut).map(test), y.slice(cut));
+    const predict = fitLogistic(X, y);
+    const base = positives / pairs.length;
+    model = { ready: score != null && score >= 0.6, auc: score, have: pairs.length, base: Math.round(base * 100) };
+    if (model.ready) {
+      const p = predict(keys.map(k => feats[k]));
+      model.prob = Math.round(p * 100);
+      return { model, level: p >= Math.max(base * 1.5, 0.35) ? 'high' : p >= base * 1.15 ? 'medium' : 'low', reasons };
+    }
+  }
+  return { model, level: reasons.length >= 2 ? 'high' : reasons.length === 1 ? 'medium' : 'low', reasons };
 }

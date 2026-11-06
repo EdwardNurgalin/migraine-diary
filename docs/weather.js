@@ -41,7 +41,7 @@ export async function refresh(force = false) {
     longitude: city.lon,
     hourly: 'pressure_msl,temperature_2m,relative_humidity_2m',
     past_days: 92,
-    forecast_days: 1,
+    forecast_days: 3, // tomorrow's pressure feeds the risk forecast
     timezone: city.timezone || 'auto',
   }, 20000);
   const h = data.hourly;

@@ -23,7 +23,16 @@ async function modules() {
 }
 
 export async function config() {
-  return { modules: await modules(), derived: DERIVED, enabled: await store.getSetting('modules', DEFAULT_MODULES) };
+  let enabled = await store.getSetting('modules', DEFAULT_MODULES);
+  const seen = await store.getSetting('modules_seen', null);
+  const fresh = seen ? DEFAULT_MODULES.filter(k => !seen.includes(k)) : [];
+  if (fresh.length || !seen) {
+    enabled = [...new Set([...enabled, ...fresh])];
+    await store.setSetting('modules', enabled);
+    await store.setSetting('modules_seen', DEFAULT_MODULES);
+  }
+  const trackCycle = await store.getSetting('track_cycle', true);
+  return { modules: await modules(), derived: DERIVED, enabled, trackCycle };
 }
 
 export async function addFactor(label, type, module) {
@@ -116,7 +125,8 @@ export async function quickAttack(intensity, medIds) {
 }
 
 export async function cycle() {
-  return stats.cycle(await store.getAll('days'));
+  const [days, manual] = await Promise.all([store.getAll('days'), store.getSetting('cycle_len', null)]);
+  return stats.cycle(days, manual);
 }
 
 export async function summary(from, to) {
@@ -146,7 +156,12 @@ function checkMed(m) {
   const name = (m.name || '').trim();
   if (!name || name.length > 80) throw new Error('Введите название (до 80 символов)');
   if (!MED_KINDS.includes(m.kind)) throw new Error('Неизвестный тип лекарства');
-  return { name, dose: (m.dose || '').trim().slice(0, 40), kind: m.kind, active: m.active !== false };
+  const date = v => /^\d{4}-\d\d-\d\d$/.test(v || '') ? v : null;
+  return {
+    name, dose: (m.dose || '').trim().slice(0, 40), kind: m.kind, active: m.active !== false,
+    start_date: m.kind === 'preventive' ? date(m.start_date) : null,
+    stop_date: m.kind === 'preventive' ? date(m.stop_date) : null,
+  };
 }
 
 export async function addMed(m) {
@@ -165,11 +180,138 @@ export async function deleteMed(id) {
 // ---------- settings ----------
 
 export async function settings() {
-  const [city, reminder_time, modules, last_backup] = await Promise.all([
-    store.getSetting('city', null), store.getSetting('reminder_time', '21:00'),
-    store.getSetting('modules', DEFAULT_MODULES), store.getSetting('last_backup', null),
+  const keys = { city: null, reminder_time: '21:00', modules: DEFAULT_MODULES, last_backup: null, profile: {},
+    track_cycle: true, cycle_len: null, pin: null };
+  const vals = await Promise.all(Object.entries(keys).map(([k, d]) => store.getSetting(k, d)));
+  const out = Object.fromEntries(Object.keys(keys).map((k, i) => [k, vals[i]]));
+  out.has_pin = !!out.pin;
+  delete out.pin;
+  return out;
+}
+
+export async function saveProfile(p) {
+  const clean = v => String(v ?? '').trim().slice(0, 80);
+  await store.setSetting('profile', { birth_year: clean(p.birth_year), diagnosis: clean(p.diagnosis), since: clean(p.since), doctor: clean(p.doctor) });
+}
+
+export async function saveCycleSettings({ track_cycle, cycle_len }) {
+  if (track_cycle != null) await store.setSetting('track_cycle', !!track_cycle);
+  if (cycle_len !== undefined) {
+    const n = Number(cycle_len);
+    await store.setSetting('cycle_len', n >= 20 && n <= 45 ? Math.round(n) : null);
+  }
+}
+
+// ---------- PIN ----------
+// Hides the diary from someone picking up the phone. It does not encrypt the data on the device.
+
+async function digest(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`headache-diary:${text}`));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+export async function setPin(pin) {
+  if (pin == null) return store.setSetting('pin', null);
+  if (!/^\d{4}$/.test(pin)) throw new Error('Код — 4 цифры');
+  await store.setSetting('pin', await digest(pin));
+}
+export async function hasPin() { return !!(await store.getSetting('pin', null)); }
+export async function checkPin(pin) { return (await store.getSetting('pin', null)) === await digest(pin); }
+
+/** Wipes every record and setting on this device. */
+export async function deleteAll() {
+  await store.replaceAll({});
+}
+
+// ---------- questionnaires ----------
+
+export const SURVEYS = {
+  hit6: {
+    title: 'HIT-6', subtitle: 'Влияние головной боли на жизнь', every: 28,
+    options: [['Никогда', 6], ['Редко', 8], ['Иногда', 10], ['Очень часто', 11], ['Всегда', 13]],
+    questions: [
+      'Когда у вас болит голова, как часто боль бывает сильной?',
+      'Как часто головная боль ограничивает обычные дела: дом, работу, учёбу, общение?',
+      'Когда у вас болит голова, как часто хочется лечь?',
+      'За последние 4 недели как часто вы чувствовали себя слишком уставшей для работы или дел из-за головной боли?',
+      'За последние 4 недели как часто головная боль вызывала раздражение или ощущение «сыта по горло»?',
+      'За последние 4 недели как часто головная боль мешала сосредоточиться на работе или делах?',
+    ],
+    grade: s => s >= 60 ? 'тяжёлое влияние' : s >= 56 ? 'значительное влияние' : s >= 50 ? 'заметное влияние' : 'небольшое влияние',
+  },
+  midas: {
+    title: 'MIDAS', subtitle: 'Сколько дней за 3 месяца отняла головная боль', every: 90,
+    questions: [
+      'Сколько дней за последние 3 месяца вы пропустили работу или учёбу из-за головной боли?',
+      'Сколько дней продуктивность на работе или учёбе была снижена вдвое и больше (не считая пропущенных)?',
+      'Сколько дней вы не занимались домашними делами из-за головной боли?',
+      'Сколько дней продуктивность в домашних делах была снижена вдвое и больше (не считая пропущенных)?',
+      'Сколько дней вы пропустили семейные, общественные или досуговые дела?',
+    ],
+    grade: s => s >= 21 ? 'IV степень — тяжёлая' : s >= 11 ? 'III степень — умеренная' : s >= 6 ? 'II степень — лёгкая' : 'I степень — минимальная',
+  },
+};
+
+export async function saveSurvey(type, answers) {
+  const def = SURVEYS[type];
+  if (!def || answers.length !== def.questions.length || answers.some(a => !(a >= 0 && a <= 92))) throw new Error('Ответьте на все вопросы');
+  const score = answers.reduce((a, b) => a + b, 0);
+  const list = await store.getSetting('surveys', []);
+  await store.setSetting('surveys', [...list, { type, date: stats.today(), answers, score, grade: def.grade(score) }]);
+  return { score, grade: def.grade(score) };
+}
+
+export async function surveys() {
+  const list = await store.getSetting('surveys', []);
+  const last = t => list.filter(x => x.type === t).at(-1) || null;
+  const due = t => !last(t) || stats.addDays(last(t).date, SURVEYS[t].every) <= stats.today();
+  return { list, hit6: last('hit6'), midas: last('midas'), due: { hit6: due('hit6'), midas: due('midas') } };
+}
+
+// ---------- the two-hour check ----------
+
+/** Doses taken at least two hours ago (today or yesterday) whose effect is not yet marked. */
+export async function pendingEffects() {
+  const now = new Date();
+  const days = await store.getAll('days', stats.addDays(stats.today(), -1), stats.today());
+  const meds = new Map((await store.getAll('meds')).map(m => [m.id, m]));
+  const out = [];
+  for (const d of days) d.attacks.forEach((a, ai) => a.doses.forEach((x, di) => {
+    if (x.effect || !x.time) return;
+    const [h, m] = x.time.split(':').map(Number);
+    const taken = stats.parseISO(d.date); taken.setHours(h, m);
+    if (now - taken >= 2 * 3600 * 1000) out.push({ date: d.date, ai, di, time: x.time, name: meds.get(x.med_id)?.name || 'лекарство' });
+  }));
+  return out;
+}
+
+export async function setEffect(date, ai, di, effect) {
+  const d = await store.get('days', date);
+  if (!d?.attacks[ai]?.doses[di] || !EFFECTS.has(effect)) throw new Error('Не нашёл этот приём');
+  d.attacks[ai].doses[di].effect = effect;
+  await store.put('days', d);
+}
+
+// ---------- analysis for "Мои данные", the report and the AI request ----------
+
+export async function analysis(from, to) {
+  const [all, meds, mods, cyc, w, trackCycle] = await Promise.all([
+    store.getAll('days'), store.getAll('meds'), modules(), cycle(), store.getAll('weather'), store.getSetting('track_cycle', true),
   ]);
-  return { city, reminder_time, modules, last_backup };
+  const medsById = new Map(meds.map(m => [m.id, m]));
+  const inRange = all.filter(d => d.date >= from && d.date <= to);
+  return {
+    monthly: stats.monthly(all, medsById, from, to),
+    meds: stats.medEfficacy(inRange, medsById),
+    menstrual: trackCycle ? stats.menstrualWindow(inRange, cyc) : null,
+    preventive: meds.filter(m => m.kind === 'preventive' && m.start_date && !m.deleted).map(m => stats.preventiveResponse(all, m)),
+    risk: stats.riskTomorrow({ days: all, cyc: trackCycle ? cyc : { periods: [], forecast: [] }, weather: byDate(w), defs: factorMap(mods) }),
+    surveys: await surveys(),
+    profile: await store.getSetting('profile', {}),
+  };
+}
+
+export async function risk() {
+  return (await analysis(stats.addDays(stats.today(), -29), stats.today())).risk;
 }
 
 export async function saveSettings(s) {
@@ -275,7 +417,8 @@ const SYM_RU = {
   nausea: 'тошнота', vomiting: 'рвота', photo: 'светобоязнь', phono: 'звукобоязнь', smell: 'непереносимость запахов',
   aura: 'аура', dizziness: 'головокружение', movement: 'усиление от движения',
 };
-const EFF_RU = { full: 'помогло', partial: 'помогло частично', none: 'не помогло' };
+const EFF_RU = { full: 'через 2 ч боль прошла', partial: 'через 2 ч стало легче', none: 'через 2 ч не помогло' };
+const DIS_RU = ['не мешала', 'немного мешала', 'сильно мешала делам', 'пришлось лечь'];
 const ru = (dict, keys) => keys.map(k => dict[k] || k).join(', ');
 const minutesBetween = (a, b) => {
   if (!a || !b) return null;
@@ -288,7 +431,7 @@ const minutesBetween = (a, b) => {
  * instructions written like a brief for a careful headache assistant, then the diary as compact lines.
  */
 export async function aiPrompt(from, to) {
-  const [s, cyc, mods] = await Promise.all([summary(from, to), cycle(), modules()]);
+  const [s, cyc, mods, an] = await Promise.all([summary(from, to), cycle(), modules(), analysis(from, to)]);
   const [days, meds] = await Promise.all([store.getAll('days', from, to), store.getAll('meds')]);
   const W = byDate(await store.getAll('weather', from, to));
   const defs = factorMap(mods);
@@ -306,6 +449,8 @@ export async function aiPrompt(from, to) {
         `${a.start_time || '?'}–${a.end_time || 'не отмечено'}${dur != null ? ` (${Math.floor(dur / 60)} ч ${dur % 60} мин)` : ''}`,
         `сила ${a.intensity}/10`,
         [ru(LOC_RU, a.location), ru(CHAR_RU, a.character), ru(SYM_RU, a.symptoms)].filter(Boolean).join('; '),
+        a.disability != null && `мешала: ${DIS_RU[a.disability]}`,
+        a.recurred && 'вернулась в течение суток',
       ].filter(Boolean).join(', '));
     }
     const doses = stats.allDoses(d).map(x => {
@@ -318,6 +463,7 @@ export async function aiPrompt(from, to) {
       .filter(([k, v]) => defs[k] && v && v !== 0)
       .map(([k, v]) => {
         const def = defs[k];
+        if (def.module === 'prodrome') return `ранний сигнал: ${def.label.toLowerCase()}`;
         return def.type === 'bool' ? def.label.toLowerCase() : def.type === 'level' ? `${def.label.toLowerCase()}: ${['нет', 'немного', 'заметно', 'сильно'][v]}` : `${def.label.toLowerCase()}: ${v}`;
       });
     if (f.length) parts.push('факторы: ' + f.join(', '));
@@ -337,6 +483,18 @@ export async function aiPrompt(from, to) {
       (cyc.forecast.length ? `, следующая ожидается ${cyc.forecast[0]}` : '')
     : cyc.periods.length ? `отмечено менструаций: ${cyc.periods.length}, для расчёта цикла пока мало данных` : 'цикл не отмечался';
   const o = s.overuse;
+  const p = an.profile || {};
+  const profile = [p.birth_year && `год рождения ${p.birth_year}`, p.diagnosis && `диагноз: ${p.diagnosis}`, p.since && `головные боли с ${p.since}`].filter(Boolean).join('; ');
+  const monthsText = an.monthly.map(m => `${m.month}: заполнено ${m.logged} из ${m.days} дн., с болью ${m.headache} (≈${m.headache_per30 ?? '—'} на 30 дней), похоже на мигрень ${m.migraine}, с обезболивающими ${m.med}`).join('\n');
+  const medsText = an.meds.map(m => `${m.name} ${m.dose}`.trim() + `: приёмов ${m.n}, оценено ${m.rated} — прошло ${m.free}, легче ${m.better}, не помогло ${m.none}` +
+    (m.median_delay != null ? `; обычно через ${m.median_delay} мин от начала боли` : '') +
+    (m.early && m.late ? `; помогло при приёме в первый час ${m.early.helped} из ${m.early.of}, позже — ${m.late.helped} из ${m.late.of}` : '')).join('\n');
+  const prevText = an.preventive.map(x => `${x.name} ${x.dose}`.trim() + ` с ${x.start}${x.stop ? ` по ${x.stop}` : ''}: дней с болью на 30 дней до — ${x.before?.per30 ?? 'мало данных'}, после первого месяца — ${x.after?.per30 ?? 'мало данных'}` +
+    (x.change != null ? ` (${x.change > 0 ? '+' : ''}${x.change}%)` : '')).join('\n');
+  const sv = an.surveys;
+  const surveysText = [sv.hit6 && `HIT-6 ${sv.hit6.score} баллов (${sv.hit6.grade}), ${sv.hit6.date}`, sv.midas && `MIDAS ${sv.midas.score} (${sv.midas.grade}), ${sv.midas.date}`].filter(Boolean).join('; ');
+  const mw = an.menstrual;
+  const mwText = mw && mw.cycles ? `приступ в окне −2…+3 дня от начала менструации — в ${mw.with_attack} из ${mw.cycles} циклов; дней с болью в этом окне ${mw.pain_in_window} из ${mw.pain_days}` : '';
 
   return `Ты — внимательный помощник по головной боли. Ты хорошо знаешь международную классификацию головных болей ICHD-3 и современные рекомендации по мигрени. Ниже мой дневник головной боли. Разбери его так, чтобы мне было понятно, а неврологу — полезно.
 
@@ -356,6 +514,7 @@ export async function aiPrompt(from, to) {
 6. Прогноз: на какие дни ближайших двух недель стоит обратить внимание и что можно сделать заранее.
 7. Что обсудить с неврологом: 5–7 конкретных вопросов по моим данным.
 8. Как вести дневник точнее: чего не хватает в записях, чтобы выводы стали надёжнее.
+9. Выжимка для невролога: полстраницы — главные цифры, характер приступов, лекарства и их эффективность, ответ на профилактику, вероятные провокаторы. У каждого вывода пометка уверенности: высокая, средняя или низкая.
 В конце задай мне 2–3 уточняющих вопроса, которые сильнее всего улучшат разбор.
 
 Сводка за период ${from} — ${to}:
@@ -363,8 +522,11 @@ export async function aiPrompt(from, to) {
 — дней с головной болью ${s.headache_days} (≈${per30(s.headache_days)} в месяц), из них похожих на мигрень ${s.migraine_days}; приступов ${s.attack_count}, средняя сила ${s.avg_intensity ?? '—'} из 10;
 — дней с обезболивающими ${s.med_days}; за последние 30 дней: триптаны и подобные — ${o.specific.days}, простые обезболивающие — ${o.simple.days}, всего — ${o.any.days};
 — лекарства: ${meds.filter(m => !m.deleted || s.med_effect.some(e => e.name === m.name)).map(m => `${m.name} ${m.dose}`.trim() + ` (${KIND_RU[m.kind]})`).join('; ') || 'не указаны'};
-— менструальный цикл: ${cycleText}.
-
+— менструальный цикл: ${cycleText}${mwText ? `; ${mwText}` : ''}.
+${profile ? `— обо мне: ${profile}.\n` : ''}${surveysText ? `— опросники: ${surveysText}.\n` : ''}${an.risk ? `— прогноз приложения на завтра: риск ${{ low: 'обычный', medium: 'немного выше обычного', high: 'повышенный' }[an.risk.level]}${an.risk.reasons.length ? ` (${an.risk.reasons.map(r => r.text).join(', ')})` : ''}.\n` : ''}
+По месяцам:
+${monthsText}
+${medsText ? `\nЭффективность лекарств (оценка через 2 часа после приёма):\n${medsText}\n` : ''}${prevText ? `\nПрофилактическое лечение:\n${prevText}\n` : ''}
 Дневник по дням (дата | боль: время, длительность, сила, где и какая, симптомы | лекарства | факторы | цикл | сон | давление | заметка):
 ${lines.join('\n') || '(записей за период нет)'}`;
 }
