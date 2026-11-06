@@ -274,7 +274,8 @@ function statusCard(data, h) {
       ${nudge}
       <div class="st-btns one"><button data-quick>Заболела голова</button></div></div>`;
   const ongoing = !a.end_time;
-  const doses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
+  // Only what was taken for the pain: a daily preventive pill is not news here.
+  const doses = [...data.attacks.flatMap(x => x.doses), ...data.doses].filter(x => medById(x.med_id)?.kind !== 'preventive');
   const sub = [
     a.start_time && (ongoing ? `с ${a.start_time}` : `${a.start_time}–${a.end_time}`),
     a.migraine && 'похоже на мигрень',
@@ -334,7 +335,9 @@ function riskCard(r) {
   const m = r.model;
   return `<div class="card riskcard ${r.level}">
     <div class="spread"><b>Риск на завтра</b><span class="lvl">${RISK_LABEL[r.level]}</span></div>
-    <p>${r.reasons.length ? r.reasons.map(x => x.text).join(', ') : 'Особых причин для приступа не видно.'}</p>
+    <p>${!r.reasons.length ? 'Особых причин для приступа не видно.'
+      : r.level === 'low' && m.ready ? `Есть: ${r.reasons.map(x => x.text).join(', ')}. Но по вашим записям после таких дней приступ бывает не чаще обычного.`
+      : r.reasons.map(x => x.text).join(', ')}</p>
     ${r.level !== 'low' ? `<p class="tip">${r.reasons.slice(0, 2).map(x => x.tip).join(' ')}</p>` : ''}
     <p class="model">${m.ready ? `Личная модель: вероятность ${m.prob}%, обычно ${m.base}%. Проверена на ваших последних днях (AUC ${m.auc}).`
       : m.auc != null ? `Личная модель пока предсказывает не лучше случайности (AUC ${m.auc}) — прогноз по общим правилам.`
