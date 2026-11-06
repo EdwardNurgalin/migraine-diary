@@ -791,7 +791,7 @@ async function renderCalendar(ym) {
   const prev = iso(new Date(y, m - 2, 1)).slice(0, 7), next = iso(new Date(y, m, 1)).slice(0, 7);
   const t = today();
   const n = data.headache_days;
-  $view.innerHTML = `
+  $view.innerHTML = `<div class="calarea">
     <div class="monthbar"><h1>${MONTHS[m - 1]}${y !== new Date().getFullYear() ? ' ' + y : ''}</h1>
       <div class="nav"><button data-go="${prev}" aria-label="Предыдущий месяц">‹</button><button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div></div>
     <p class="sumline"><b>${n}</b> ${plural(n, 'день', 'дня', 'дней')} боли · <b>${data.migraine_days}</b> похоже на мигрень · ${overuseText(data.overuse)}</p>
@@ -799,24 +799,42 @@ async function renderCalendar(ym) {
       <button data-view="month" class="${pr.view === 'month' ? 'on' : ''}">Месяц</button>
       <button data-view="list" class="${pr.view === 'list' ? 'on' : ''}">Хронология</button>
     </div>
-    <div class="calarea">${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}</div>`;
+    ${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}</div>`;
 
   $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
-  // Swipe left or right anywhere on the month to change it.
+  // Swipe left or right on the month to change it: a finger on the phone, two fingers on a Mac trackpad.
   const area = $view.querySelector('.calarea');
+  const flip = dir => {
+    if (dir < 0) location.hash = `#calendar/${prev}`;
+    else if (next <= t.slice(0, 7)) location.hash = `#calendar/${next}`;
+    else toast('Это текущий месяц');
+  };
   let sx = null, sy = 0;
   area.addEventListener('pointerdown', e => { sx = e.clientX; sy = e.clientY; });
-  area.addEventListener('pointercancel', () => { sx = null; });
-  area.addEventListener('pointerup', e => {
+  area.addEventListener('pointermove', e => {
+    if (sx == null) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (Math.abs(dx) > Math.abs(dy)) area.style.transform = `translateX(${Math.max(-60, Math.min(60, dx / 3))}px)`;
+  });
+  const end = e => {
+    area.style.transform = '';
     if (sx == null) return;
     const dx = e.clientX - sx, dy = e.clientY - sy;
     sx = null;
-    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
     area.dataset.swiped = '1';
-    if (dx > 0) location.hash = `#calendar/${prev}`;
-    else if (next <= t.slice(0, 7)) location.hash = `#calendar/${next}`;
-  });
-  // A swipe must not also count as a tap on a day.
+    flip(dx > 0 ? -1 : 1);
+  };
+  area.addEventListener('pointerup', end);
+  area.addEventListener('pointercancel', () => { sx = null; area.style.transform = ''; });
+  let wheelX = 0, wheelLock = false;
+  area.addEventListener('wheel', e => {
+    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+    e.preventDefault();
+    if (wheelLock) return;
+    wheelX += e.deltaX;
+    if (Math.abs(wheelX) > 60) { wheelLock = true; flip(wheelX > 0 ? 1 : -1); wheelX = 0; }
+  }, { passive: false });
   area.addEventListener('click', e => { if (area.dataset.swiped) { e.stopPropagation(); e.preventDefault(); delete area.dataset.swiped; } }, true);
   $view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { pref.set('cal_view', b.dataset.view); renderCalendar(ym); });
   $view.querySelectorAll('[data-cal-toggle]').forEach(b => b.onclick = () => {
@@ -1098,9 +1116,11 @@ function overuseBanner(o) {
     </table></div>`;
 }
 
+// Pain bars and the pressure line with a date under every day. Up to a month fits the screen;
+// longer periods get the same spacing and scroll sideways, opening at the latest days.
 function chart(series) {
-  const W = 600, H = 186, top = 8, bottom = 34, n = series.length;
-  const bw = W / n, ph = H - top - bottom;
+  const n = series.length, bw = n <= 31 ? 600 / n : 20, W = n * bw;
+  const H = 210, top = 8, bottom = 58, ph = H - top - bottom;
   const ps = series.map(p => p.pressure).filter(v => v != null);
   const pmin = Math.min(...ps), pmax = Math.max(...ps), pr = Math.max(pmax - pmin, 1);
   const bars = series.map((p, i) => {
@@ -1109,18 +1129,15 @@ function chart(series) {
     return `<rect x="${i * bw + bw * 0.15}" y="${top + ph - h}" width="${Math.max(bw * 0.7, 1)}" height="${h}" rx="2" fill="${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"><title>${fmtDate(p.date)}: ${p.intensity}/10</title></rect>`;
   }).join('');
   const line = ps.length > 1 ? `<polyline fill="none" stroke="var(--muted)" stroke-opacity=".8" stroke-width="1.5" stroke-linejoin="round" points="${series.map((p, i) => p.pressure == null ? null : `${i * bw + bw / 2},${top + ph - (p.pressure - pmin) / pr * ph}`).filter(Boolean).join(' ')}"/>` : '';
-  // Dates under the bars, like 8.11 · 13.11 · 18.11: about six labels whatever the period.
-  const every = Math.max(1, Math.ceil(n / 6));
+  // Every day gets its date, written upwards so 30 of them fit side by side; Mondays are a little brighter.
   const axis = series.map((p, i) => {
-    if ((n - 1 - i) % every) return '';
-    const x = Math.min(Math.max(i * bw + bw / 2, 22), W - 22);
-    return `<rect x="${i * bw + bw / 2 - 0.5}" y="${top + ph}" width="1" height="5" fill="var(--line)"/>
-      <text x="${x}" y="${H - 6}" text-anchor="middle" font-size="19" fill="var(--muted)">${Number(p.date.slice(8))}.${p.date.slice(5, 7)}</text>`;
+    const x = i * bw + bw / 2, y = top + ph + 8, mon = parseISO(p.date).getDay() === 1;
+    return `<text x="${x}" y="${y}" transform="rotate(-90 ${x} ${y})" dy="5" text-anchor="end" font-size="14" fill="${mon ? 'var(--text)' : 'var(--muted)'}">${Number(p.date.slice(8))}.${p.date.slice(5, 7)}</text>`;
   }).join('');
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Сила боли по дням и атмосферное давление">
-    <rect x="0" y="${top + ph}" width="${W}" height="1" fill="var(--line)"/>${bars}${line}${axis}</svg>
+  return `<div class="chartscroll"><svg class="chart" viewBox="0 0 ${W} ${H}" style="width:${W / 600 * 100}%" role="img" aria-label="Сила боли по дням и атмосферное давление">
+    <rect x="0" y="${top + ph}" width="${W}" height="1" fill="var(--line)"/>${bars}${line}${axis}</svg></div>
     <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span>
-      <span>— давление ${ps.length ? `${Math.round(pmin)}–${Math.round(pmax)} гПа` : '(укажите город)'}</span></div>`;
+      <span>— давление ${ps.length ? `${Math.round(pmin)}–${Math.round(pmax)} гПа` : '(укажите город)'}</span>${n > 31 ? '<span>график листается влево</span>' : ''}</div>`;
 }
 
 // Radial map: the closer to the centre, the stronger the association.
@@ -1207,6 +1224,8 @@ async function renderData(days) {
       <p><b>Какая:</b> ${s.characters.map(([k, n]) => `${esc(L.character[k] || k)} (${n})`).join(', ') || '—'}</p>
       <p><b>Симптомы:</b> ${s.symptoms.map(([k, n]) => `${esc(L.symptoms[k]?.[0] || k)} (${n})`).join(', ') || '—'}</p></div>` : ''}
     <a class="btn primary wide" href="#report/${addDays(to, -89)}/${to}">Отчёт для врача</a>`;
+  const sc = $view.querySelector('.chartscroll');
+  if (sc) sc.scrollLeft = sc.scrollWidth;
 }
 
 function medBlock(list) {
