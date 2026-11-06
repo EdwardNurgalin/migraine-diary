@@ -103,25 +103,142 @@ function hoursBetween(a, b) {
 
 export const deleteDay = date => store.del('days', date);
 
+// ---------- quick log: one swipe for the strength, then single taps that each save at once ----------
+
+const hhmm = d => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const emptyDay = date => ({ date, headache: false, factors: {}, period: false, sleep_hours: null, sleep_start: null, sleep_end: null, note: '', attacks: [], doses: [] });
+const newAttack = (time, intensity) => ({ start_time: time, end_time: null, intensity, location: [], character: [], symptoms: [], note: '', doses: [], disability: null, recurred: false });
+
+async function todayAttack(date) {
+  const day = await store.get('days', date);
+  if (!day?.attacks[0]) throw new Error('Сначала отметьте силу боли');
+  return day;
+}
+
 /**
- * Attack mode: record "it hurts now" in a couple of taps. Adds to today's record without touching
- * anything already filled in; details can be added later in the normal form.
+ * The swipe: today's attack gets this strength. With no attack yet, one starts now. An attack that has
+ * already ended starts again and is marked as returned (pain coming back the same day is the same attack).
+ * Returns the record as it was before, so the sheet can undo the swipe.
  */
-export async function quickAttack(intensity, medIds) {
+export async function logPain(intensity) {
+  if (!(Number.isInteger(intensity) && intensity >= 1 && intensity <= 10)) throw new Error('Сила боли — от 1 до 10');
   const date = stats.today();
-  const now = new Date();
-  const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-  const old = await store.get('days', date);
-  const day = old || { date, factors: {}, period: false, sleep_hours: null, note: '', attacks: [], doses: [] };
-  const doses = medIds.map(med_id => ({ med_id, time, effect: null }));
-  if (day.attacks.length) {
-    const a = day.attacks[0];
-    a.intensity = Math.max(a.intensity, intensity);
-    a.doses = [...a.doses, ...doses];
-  } else {
-    day.attacks = [{ start_time: time, end_time: null, intensity, location: [], character: [], symptoms: [], note: '', doses }];
+  const before = await store.get('days', date);
+  const day = before ? structuredClone(before) : emptyDay(date);
+  const a = day.attacks[0];
+  let recurred = false;
+  if (!a) day.attacks = [newAttack(hhmm(new Date()), intensity)];
+  else if (a.end_time) {
+    Object.assign(a, { end_time: null, recurred: true, intensity: Math.max(a.intensity, intensity) });
+    recurred = true;
+  } else a.intensity = intensity;
+  await saveDay(date, { ...day, headache: true });
+  return { before: before || null, recurred };
+}
+
+export async function restoreDay(date, before) {
+  if (before) await store.put('days', before);
+  else await store.del('days', date);
+}
+
+/** Changes a few fields of the day's attack: where and how it hurts, symptoms, times, disability. */
+export async function patchAttack(date, patch) {
+  const day = await todayAttack(date);
+  const a = day.attacks[0];
+  const lists = { location: LOC_RU, character: CHAR_RU, symptoms: SYM_RU };
+  for (const [k, v] of Object.entries(patch)) {
+    if (lists[k]) {
+      if (!Array.isArray(v) || v.some(x => !lists[k][x])) throw new Error('Некорректное значение');
+      a[k] = [...new Set(v)];
+    } else if (k === 'start_time' || k === 'end_time') {
+      if (v != null && !TIME_RE.test(v)) throw new Error('Некорректное время');
+      a[k] = v;
+    } else if (k === 'disability') {
+      if (v != null && ![0, 1, 2, 3].includes(v)) throw new Error('Некорректное значение');
+      a[k] = v;
+    } else if (k === 'recurred') a[k] = !!v;
+    else throw new Error('Некорректное поле');
   }
   return saveDay(date, { ...day, headache: true });
+}
+
+/** "Приняла сейчас": a dose at the current time; a second tap removes that same dose. */
+export async function addDose(date, medId) {
+  const day = await todayAttack(date);
+  const time = hhmm(new Date());
+  day.attacks[0].doses.push({ med_id: medId, time, effect: null });
+  await saveDay(date, { ...day, headache: true });
+  return time;
+}
+
+export async function removeDose(date, medId, time) {
+  const day = await todayAttack(date);
+  const doses = day.attacks[0].doses;
+  const i = doses.findIndex(x => x.med_id === medId && x.time === time);
+  if (i >= 0) doses.splice(i, 1);
+  await saveDay(date, { ...day, headache: true });
+}
+
+export async function setPeriod(date, on) {
+  const day = (await store.get('days', date)) || emptyDay(date);
+  await saveDay(date, { ...day, period: !!on });
+}
+
+/** One tap "без боли": the day counts as filled in; factors can be added later in the form. */
+export async function markNoPain(date) {
+  const day = await store.get('days', date);
+  if (day?.headache) throw new Error('В этот день уже записана боль');
+  await saveDay(date, { ...(day || emptyDay(date)), headache: false, attacks: [] });
+}
+
+/** What the quick sheet needs: today's record, medicines most used first, her usual attack, a period hint. */
+export async function quickContext() {
+  const t = stats.today();
+  const [all, medList, trackCycle, manual] = await Promise.all([
+    store.getAll('days'), store.getAll('meds'), store.getSetting('track_cycle', true), store.getSetting('cycle_len', null),
+  ]);
+  const since = stats.addDays(t, -180);
+  const uses = new Map();
+  for (const d of all) if (d.date >= since) for (const x of stats.allDoses(d)) uses.set(x.med_id, (uses.get(x.med_id) || 0) + 1);
+  const acute = medList.filter(m => m.active && !m.deleted && m.kind !== 'preventive')
+    .sort((a, b) => (uses.get(b.id) || 0) - (uses.get(a.id) || 0) || a.name.localeCompare(b.name, 'ru'));
+  const rec = all.find(d => d.date === t) || null;
+  const cyc = stats.cycle(all, manual);
+  const yesterday = all.find(d => d.date === stats.addDays(t, -1));
+  return {
+    today: withMigraine(rec),
+    meds: acute,
+    typical: stats.typicalAttack(all.filter(d => d.date < t)),
+    trackCycle,
+    periodLikely: trackCycle && !rec?.period && (cyc.forecast.includes(t) || !!yesterday?.period),
+  };
+}
+
+/** Everything the home screen shows besides the day itself. */
+export async function home() {
+  await refreshWeather();
+  const t = stats.today();
+  const [all, medList, mods, w, trackCycle, manual] = await Promise.all([
+    store.getAll('days'), store.getAll('meds'), modules(), store.getAll('weather'),
+    store.getSetting('track_cycle', true), store.getSetting('cycle_len', null),
+  ]);
+  const days = new Map(all.map(d => [d.date, d]));
+  let streak = 0;
+  for (let d = days.has(t) ? t : stats.addDays(t, -1); days.has(d) && !days.get(d).headache; d = stats.addDays(d, -1)) streak++;
+  const ym = t.slice(0, 7);
+  const month = all.filter(d => d.date.startsWith(ym));
+  const cyc = stats.cycle(all, manual);
+  const noCycle = { periods: [], forecast: [] };
+  return {
+    streak,
+    lastPain: all.filter(d => d.headache).at(-1)?.date ?? null,
+    month: { pain: month.filter(d => d.headache).length, migraine: month.filter(d => d.attacks.some(stats.isMigraine)).length },
+    overuse: stats.overuse(all, new Map(medList.map(m => [m.id, m])), t),
+    cycle: trackCycle && cyc.periods.length ? { day: cyc.dayOf(t), next: cyc.forecast[0] ?? null } : null,
+    missed: stats.dateRange(stats.addDays(t, -6), stats.addDays(t, -1)).filter(d => !days.has(d)),
+    risk: stats.riskTomorrow({ days: all, cyc: trackCycle ? cyc : noCycle, weather: byDate(w), defs: factorMap(mods) }),
+  };
 }
 
 export async function cycle() {

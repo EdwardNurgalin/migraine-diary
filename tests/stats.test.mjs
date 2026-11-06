@@ -1,7 +1,7 @@
 // Run: node --test tests/*.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addDays, cycle, isMigraine, medEfficacy, menstrualWindow, monthly, overuse, preventiveResponse, riskTomorrow, summary, today } from '../docs/stats.js';
+import { addDays, cycle, isMigraine, medEfficacy, menstrualWindow, monthly, overuse, preventiveResponse, riskTomorrow, summary, today, typicalAttack } from '../docs/stats.js';
 import { FACTORS } from '../docs/config.js';
 
 const attack = over => ({ start_time: '10:00', end_time: '14:00', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [], ...over });
@@ -180,4 +180,16 @@ test('risk: rules first, then a personal model that is checked before use', () =
   const learned = riskTomorrow({ days, cyc: { periods: [], forecast: [] }, weather: {}, defs: FACTORS, date: days.at(-1).date });
   assert.equal(learned.model.ready, true);
   assert.ok(learned.model.auc >= 0.9);
+});
+
+test('typical attack: what at least half of the recent described attacks had', () => {
+  const att = (location, character, symptoms) => ({ intensity: 6, location, character, symptoms, doses: [] });
+  const days = [
+    { date: '2026-01-01', attacks: [att(['left'], ['pulsating'], ['nausea', 'photo'])] },
+    { date: '2026-01-05', attacks: [att(['left'], ['pulsating'], ['photo'])] },
+    { date: '2026-01-09', attacks: [att([], [], [])] }, // not described: ignored
+    { date: '2026-01-12', attacks: [att(['right'], ['pressing'], ['nausea', 'photo'])] },
+  ];
+  assert.equal(typicalAttack(days.slice(0, 2)), null); // fewer than 3 described attacks
+  assert.deepEqual(typicalAttack(days), { location: ['left'], character: ['pulsating'], symptoms: ['photo', 'nausea'], of: 3 });
 });

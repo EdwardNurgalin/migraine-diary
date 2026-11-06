@@ -85,17 +85,17 @@ async function route() {
   let [name, a, b] = (location.hash.slice(1) || 'diary').split('/');
   if (name === 'today' || name === 'day') name = 'diary';
   wz = null;
-  if (name !== 'attack') attackState = null;
+  if (qs) closeQuick(false);
   document.body.classList.toggle('wizard', name === 'log');
-  document.body.classList.toggle('attack', name === 'attack');
-  applyDim(name === 'attack' ? Number(pref.get('attack_dim', 0.2)) : 0);
+  document.body.classList.toggle('home', TAB_OF[name] === 'diary');
+  applyDim(0);
   document.querySelectorAll('.tabs a').forEach(el => el.classList.toggle('on', el.dataset.tab === TAB_OF[name]));
   window.scrollTo(0, 0);
   const valid = d => d && /^\d{4}-\d\d-\d\d$/.test(d) && d <= today() ? d : today();
   const views = {
     diary: () => renderDiary(valid(a)),
     log: () => startWizard(valid(a), b === 'yes'),
-    attack: async () => renderAttack(),
+    attack: async () => { await renderDiary(today()); await openQuick(); },
     calendar: () => renderCalendar(a || today().slice(0, 7)),
     data: () => renderData(Number(a) || 30),
     report: () => renderReport(a, b),
@@ -192,9 +192,16 @@ function dayMark(p, { selected = false, isToday = false, meds = true } = {}) {
   return `<span class="${cls}">${size ? `<i class="disk" style="width:${size}px;height:${size}px;background:${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"></i>` : ''}<b>${Number(p.date.slice(8))}</b>${!future && !p.logged ? '<sup class="q">?</sup>' : ''}${meds && p.meds ? '<i class="medmark"></i>' : ''}</span>`;
 }
 
+const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+const MONTHS_PREP = ['январе', 'феврале', 'марте', 'апреле', 'мае', 'июне', 'июле', 'августе', 'сентябре', 'октябре', 'ноябре', 'декабре'];
+const daysFrom = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000);
+
 async function renderDiary(d) {
+  const isToday = d === today();
   const end = [addDays(d, 3), today()].sort()[0], start = addDays(end, -6);
-  const [day, s, set, pending, risk] = await Promise.all([api.day(d), api.summary(start, end), api.settings(), api.pendingEffects(), api.risk()]);
+  const [day, s, set, pending, h] = await Promise.all([
+    api.day(d), api.summary(start, end), api.settings(), api.pendingEffects(), isToday ? api.home() : null,
+  ]);
   const backupDue = s.logged_days > 0 && (!set.last_backup || Date.now() - set.last_backup > BACKUP_EVERY_MS);
   if (backupDue) await prepareBackup();
   const strip = s.series.map(p => {
@@ -202,32 +209,122 @@ async function renderDiary(d) {
     return `<a href="#diary/${p.date}" aria-label="${fmtDate(p.date)}${p.type ? ', ' + L.types[p.type] : ', не заполнен'}">
       <span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span>${dayMark(p, { selected: p.date === d })}</a>`;
   }).join('');
+  const dt = parseISO(d);
+  const title = isToday ? 'Сегодня' : d === addDays(today(), -1) ? 'Вчера' : fmtDate(d);
 
   $view.innerHTML = `
-    <h1>Дневник</h1>
+    <h1 style="margin-bottom:0">${title}</h1>
+    <p class="datesub">${WEEKDAYS[dt.getDay()]}${title === fmtDate(d) ? '' : ', ' + fmtDate(d)}</p>
     ${showInstallHint() ? `<div class="banner warn hint"><button class="ghost" data-hide-hint aria-label="Скрыть подсказку">✕</button>
       <b>Добавьте дневник на экран «Домой»</b>
       <p style="font-size:14px">«Поделиться» → «На экран „Домой“». Дальше открывайте иконку: записи из вкладки Safari в ней не появятся.</p></div>` : ''}
     <div class="weekstrip">${strip}<a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
     ${pending.map(x => `<div class="card effcard"><div>Помог ли ${esc(x.name)}, принятый ${x.date === today() ? '' : 'вчера '}в ${x.time}?</div>
       <div class="effbtns">${Object.entries(L.effects).map(([k, v]) => `<button data-eff="${k}" data-date="${x.date}" data-ai="${x.ai}" data-di="${x.di}">${v}</button>`).join('')}</div></div>`).join('')}
-    ${day.day ? dayCard(day) : `
-      <p class="question">Болела ли голова ${dayWord(d)}?</p>
-      <a class="choice no" href="#log/${d}/no"><span class="ic">✓</span><span>Нет, всё спокойно<small>Отметить, как прошёл день</small></span></a>
-      <a class="choice yes" href="#log/${d}/yes"><span class="ic">∿</span><span>Да, болела<small>Приступ, лекарства и факторы</small></span></a>`}
-    ${d === today() ? '<a class="attackbtn" href="#attack">☾ Болит сейчас — записать в два касания</a>' : ''}
-    ${d === today() ? riskCard(risk) : ''}
-    ${s.overuse.status !== 'ok' ? overuseBanner(s.overuse) : ''}
+    ${statusCard(day, h)}
+    ${!day.day ? '' : isToday ? `<details class="daymore"><summary>Подробности дня</summary>${dayCard(day)}</details>` : dayCard(day)}
+    ${isToday ? riskCard(h.risk) + medsMeter(h.overuse) + monthTiles(h) + missedCard(h.missed) : ''}
     ${backupDue ? `<div class="banner ok"><b>Пора сделать резервную копию</b>
       <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
       <button class="primary" data-backup style="margin-top:6px">Сохранить копию</button></div>` : ''}`;
+
+  const again = () => renderDiary(d).catch(err => toast(err.message));
   $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
   $view.querySelectorAll('[data-eff]').forEach(b => b.onclick = async () => {
     await api.setEffect(b.dataset.date, Number(b.dataset.ai), Number(b.dataset.di), b.dataset.eff);
     toast('Отмечено');
-    renderDiary(d);
+    again();
   });
   $view.querySelector('[data-hide-hint]')?.addEventListener('click', e => { pref.set('install_hint_hidden', '1'); e.target.closest('.banner').remove(); });
+  $view.querySelector('[data-no-pain]')?.addEventListener('click', async () => {
+    try { await api.markNoPain(d); toast('Отмечено: без боли'); again(); } catch (err) { toast(err.message); }
+  });
+  $view.querySelectorAll('[data-quick]').forEach(b => b.onclick = () => openQuick().catch(err => toast(err.message)));
+  $view.querySelector('[data-pain-over]')?.addEventListener('click', async () => {
+    const t = nowTime();
+    await api.patchAttack(d, { end_time: t });
+    toast(`Отмечено: прошла в ${t}`);
+    again();
+  });
+}
+
+// The big card at the top: how the day is going, with the one or two actions that make sense right now.
+function statusCard(data, h) {
+  const d = data.date, day = data.day, a = data.attacks[0], isToday = d === today();
+  if (!isToday) {
+    if (day) return '';
+    return `<div class="status">
+      <div class="st-big">Болела ли голова ${dayWord(d)}?</div>
+      <div class="st-btns"><button class="primary" data-no-pain>Не болела</button><a class="btn" href="#log/${d}/yes">Болела</a></div>
+      <a class="st-link" href="#log/${d}/no">Заполнить день подробно</a></div>`;
+  }
+  const streak = h.streak ? `${h.streak} ${plural(h.streak, 'день', 'дня', 'дней')} без боли подряд` : h.lastPain ? `последняя боль — ${dayWord(h.lastPain)}` : '';
+  const nudge = !day ? '' : day.headache && a && !a.location.length && !a.character.length && !a.symptoms.length
+    ? '<button class="st-nudge" data-quick>Отметьте, где болит и что ещё было, — так видно, похоже ли на мигрень →</button>'
+    : !Object.keys(day.factors).length && enabledModules().length
+      ? `<a class="st-nudge" href="#log/${d}/${day.headache ? 'yes' : 'no'}">Добавить сон и факторы — около минуты →</a>` : '';
+  if (!day) return `<div class="status">
+      ${streak ? `<div class="st-top">${streak}</div>` : ''}
+      <div class="st-big">Как голова сегодня?</div>
+      <div class="st-btns"><button class="primary" data-no-pain>Не болит</button><button data-quick>Болит</button></div>
+      <a class="st-link" href="#log/${d}/no">Заполнить день подробно</a></div>`;
+  if (!day.headache) return `<div class="status calm">
+      ${streak ? `<div class="st-top">${streak}</div>` : ''}
+      <div class="st-big">Спокойно</div><div class="st-sub">сегодня без головной боли</div>
+      ${nudge}
+      <div class="st-btns one"><button data-quick>Заболела голова</button></div></div>`;
+  const ongoing = !a.end_time;
+  const doses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
+  const sub = [
+    a.start_time && (ongoing ? `с ${a.start_time}` : `${a.start_time}–${a.end_time}`),
+    a.migraine && 'похоже на мигрень',
+    a.recurred && 'возвращалась',
+    ...doses.map(x => `${esc(medById(x.med_id)?.name || 'лекарство')}${x.time ? ' в ' + x.time : ''}`),
+  ].filter(Boolean).join(' · ');
+  return `<div class="status pain">
+      <div class="st-top">${ongoing ? 'Болит сейчас' : 'Сегодня болела голова'}</div>
+      <div class="st-big"><b style="color:${a.migraine ? 'var(--mi)' : 'var(--ha)'}">${a.intensity}</b> из 10 · ${INTENSITY_WORDS[a.intensity]}</div>
+      ${sub ? `<div class="st-sub">${sub}</div>` : ''}
+      ${nudge}
+      <div class="st-btns">${ongoing ? '<button class="primary" data-pain-over>Боль прошла</button><button data-quick>Дополнить</button>'
+        : '<button data-quick>Дополнить</button><button data-quick>Вернулась</button>'}</div></div>`;
+}
+
+// Painkiller days against the medication-overuse limit, always visible: the number neurologists ask about first.
+function medsMeter(o) {
+  const labels = { specific: 'триптаны', simple: 'простые обезболивающие', any: 'все обезболивающие вместе' };
+  const key = Object.keys(labels).sort((a, b) => o[b].days / o[b].limit - o[a].days / o[a].limit)[0];
+  const x = o[key];
+  const note = !x.days ? 'За 30 дней ни одного дня с обезболивающими.'
+    : x.status === 'ok' ? `Дни за последние 30, считаются ${labels[key]}. До границы ещё ${x.limit - x.days} ${plural(x.limit - x.days, 'день', 'дня', 'дней')}.`
+    : x.status === 'warn' ? `Близко к границе (${labels[key]}): чаще — и обезболивающие сами начинают учащать боль.`
+    : `Больше рекомендуемого (${labels[key]}) — стоит обсудить с врачом.`;
+  return `<a class="card linkcard" href="#data">
+    <div class="spread"><span>Обезболивающие</span><b class="lv-${x.status}" style="white-space:nowrap">${x.days} из ${x.limit} дней</b></div>
+    <div class="meter lv-${x.status}"><i style="width:${Math.min(100, x.days / x.limit * 100)}%"></i></div>
+    <p class="muted" style="margin-bottom:0">${note}</p></a>`;
+}
+
+function monthTiles(h) {
+  const t = today(), m = Number(t.slice(5, 7)) - 1;
+  const month = `<a class="tile" href="#calendar/${t.slice(0, 7)}"><span>В ${MONTHS_PREP[m]}</span>
+    <b>${h.month.pain} ${plural(h.month.pain, 'день', 'дня', 'дней')} боли</b><small>${h.month.migraine} похоже на мигрень</small></a>`;
+  let second;
+  if (h.cycle) {
+    const n = h.cycle.next ? daysFrom(t, h.cycle.next) : null;
+    const when = n == null ? 'прогноз появится после второго цикла' : n > 0 ? `менструация через ${n} ${plural(n, 'день', 'дня', 'дней')}` : 'менструация ожидается сейчас';
+    second = `<div class="tile"><span>Цикл</span><b>${h.cycle.day ? `${h.cycle.day}-й день` : 'день неизвестен'}</b><small>${when}</small></div>`;
+  } else {
+    second = `<div class="tile"><span>Без боли подряд</span><b>${h.streak} ${plural(h.streak, 'день', 'дня', 'дней')}</b><small>${h.lastPain ? `последняя — ${dayWord(h.lastPain)}` : 'боли не записано'}</small></div>`;
+  }
+  return `<div class="tiles">${month}${second}</div>`;
+}
+
+function missedCard(missed) {
+  if (!missed.length) return '';
+  const shown = missed.slice(-3).reverse().map(fmtDate).join(', ');
+  return `<a class="card linkcard missed" href="#diary/${missed.at(-1)}">
+    <span>Не заполнено: ${shown}${missed.length > 3 ? ` и ещё ${missed.length - 3}` : ''}</span><span aria-hidden="true">→</span></a>`;
 }
 
 const RISK_LABEL = { low: 'обычный', medium: 'немного выше обычного', high: 'повышенный' };
@@ -678,48 +775,184 @@ function chronology(data, pr) {
     <div class="chrono">${rows}</div>`;
 }
 
-// ---------- attack mode ----------
+// ---------- quick log: one swipe, then single taps ----------
+//
+// The swipe alone saves an attack (time, weather and cycle day fill in by themselves). Everything after it is
+// one tap per answer and saves at once, so closing the sheet at any moment loses nothing. "Как обычно" fills
+// her usual pattern in one tap; the chips cover exactly what tells migraine from other headache (ICHD-3).
 
-const ATTACK_LEVELS = [[4, 'Терпимо', 'можно заниматься делами'], [7, 'Сильно', 'трудно что-то делать'], [9, 'Невыносимо', 'нужно лечь']];
-let attackState = null;
+const QUICK_LOC = ['left', 'right', 'both', 'eye'];
+const QUICK_CHAR = ['pulsating', 'pressing'];
+const QUICK_SYM = ['nausea', 'photo', 'phono', 'movement', 'aura', 'vomiting'];
+const START_AGO = [[0, 'сейчас'], [30, '30 мин назад'], [60, '1 ч назад'], [120, '2 ч назад'], [180, '3 ч назад']];
+let qs = null;
+const $sheet = document.getElementById('sheet');
 
-function renderAttack() {
-  attackState ??= { level: null, meds: new Set() };
-  const acute = meds.filter(m => m.active && m.kind !== 'preventive');
-  $view.innerHTML = `
-    <div class="wiz-top"><button class="x" data-attack="close" aria-label="Закрыть">✕</button></div>
-    <div class="attack-head"><b>Болит сейчас</b><span>Подробности можно дописать потом</span></div>
-    ${ATTACK_LEVELS.map(([v, t, s]) => `<button class="bigopt ${attackState.level === v ? 'on' : ''}" data-level="${v}">${t}<small>${s}</small></button>`).join('')}
-    ${acute.length ? `<h3>Что приняли</h3><div class="pills">${acute.map(m => `<button class="pill ${attackState.meds.has(m.id) ? 'on' : ''}" data-med="${m.id}">${esc(m.name)} ${esc(m.dose)}</button>`).join('')}</div>` : ''}
-    <button class="primary wide" data-attack="save" style="margin-top:24px;padding:16px;font-size:18px">Записать</button>`;
+async function openQuick() {
+  if (!CFG) await loadBase();
+  const ctx = await api.quickContext();
+  const a = ctx.today?.attacks[0];
+  qs = { ctx, mode: !a ? 'new' : a.end_time ? 'ended' : 'open', value: a && !a.end_time ? a.intensity : null, added: new Map(), undo: undefined };
+  document.body.classList.add('sheet-open');
+  applyDim(Number(pref.get('attack_dim', 0.2)));
+  drawQuick();
+  $sheet.querySelector('.qs-panel').focus();
 }
 
-async function attackAction(el) {
-  if (el.dataset.level) attackState.level = Number(el.dataset.level);
-  else if (el.dataset.med) {
-    const id = Number(el.dataset.med);
-    attackState.meds.has(id) ? attackState.meds.delete(id) : attackState.meds.add(id);
-  } else if (el.dataset.attack === 'close') {
-    location.hash = '#diary';
-    return;
-  } else if (el.dataset.attack === 'save') {
-    if (!attackState.level) return toast('Выберите, насколько сильно болит');
-    await api.quickAttack(attackState.level, [...attackState.meds]);
-    attackState = null;
-    $view.innerHTML = `
-      <div class="attack-head" style="margin-top:70px"><b>Записано</b><span>Отдохните. Когда станет легче, можно дописать симптомы и факторы.</span></div>
-      <a class="btn wide" href="#log/${today()}/yes">Дописать подробности</a>
-      <a class="btn wide" style="margin-top:10px;background:transparent;color:var(--muted)" href="#diary">Закрыть</a>`;
-    return;
-  } else return;
-  renderAttack();
+function closeQuick(rerender = true) {
+  qs = null;
+  $sheet.innerHTML = '';
+  document.body.classList.remove('sheet-open');
+  applyDim(0);
+  if (!rerender) return;
+  if (location.hash.startsWith('#attack')) location.hash = '#diary';
+  else route();
 }
 
-$view.addEventListener('click', e => {
-  if (!document.body.classList.contains('attack')) return;
-  const el = e.target.closest('[data-level],[data-med],[data-attack]');
-  if (el) attackAction(el).catch(err => toast(err.message));
+const minusMinutes = mins => {
+  const d = new Date(Date.now() - mins * 60000);
+  return d.toDateString() === new Date().toDateString() ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : '00:00';
+};
+const chip = (on, attrs, text) => `<button class="pill ${on ? 'on' : ''}" ${attrs} aria-pressed="${on}">${text}</button>`;
+
+function drawQuick() {
+  const { ctx } = qs, a = ctx.today?.attacks[0], v = qs.value;
+  const head = qs.mode === 'new' ? 'Насколько болит?' : qs.mode === 'ended' ? 'Боль вернулась?' : 'Сила боли на пике';
+  const hint = qs.mode === 'new' ? 'Проведите пальцем до нужной силы и отпустите — запись сохранится'
+    : qs.mode === 'ended' ? `Приступ закончился в ${a.end_time}. Если снова болит — проведите по шкале. Ниже можно дополнить.`
+    : 'Сохранено. Если сила другая — проведите ещё раз';
+  let details = '';
+  if (a) {
+    const sym = new Set(a.symptoms), loc = new Set(a.location), ch = new Set(a.character);
+    const typ = ctx.typical;
+    const typItems = typ ? [...typ.location.map(k => L.location[k]), ...typ.character.map(k => L.character[k]), ...typ.symptoms.map(k => L.symptoms[k][0])] : [];
+    const typDone = typ && typ.location.every(k => loc.has(k)) && typ.character.every(k => ch.has(k)) && typ.symptoms.every(k => sym.has(k));
+    const earlier = a.doses.filter(x => !qs.added.has(x.med_id) || qs.added.get(x.med_id) !== x.time);
+    const verdict = a.migraine ? '<b>Похоже на мигрень</b> — по признакам ICHD-3. Диагноз ставит врач.'
+      : !loc.size && !ch.size && !sym.size ? 'Отметьте, где болит и что ещё было, — по этому видно, похоже ли на мигрень.'
+      : 'По отмеченному пока не похоже на мигрень.';
+    const startPick = START_AGO.find(([m]) => a.start_time === minusMinutes(m))?.[0];
+    details = `
+      <h3>Приняла сейчас</h3>
+      ${ctx.meds.length ? `<div class="pills">${ctx.meds.map(m => chip(qs.added.has(m.id), `data-q="med" data-id="${m.id}"`,
+        `${esc(m.name)}${m.dose ? ' ' + esc(m.dose) : ''}${qs.added.has(m.id) ? ' · ' + qs.added.get(m.id) : ''}`)).join('')}</div>`
+        : '<p class="muted">Добавьте свои лекарства в <a href="#settings" data-q="go">Настройках</a> — здесь появятся кнопки.</p>'}
+      ${earlier.length ? `<p class="muted">Уже записано: ${earlier.map(x => `${esc(medById(x.med_id)?.name || 'лекарство')}${x.time ? ' в ' + x.time : ''}`).join(', ')}</p>` : ''}
+      ${typ && !typDone ? `<button class="qs-usual" data-q="usual"><b>Как обычно</b><span>${esc(typItems.join(', ').toLowerCase())}</span></button>` : ''}
+      <h3>Где и какая</h3>
+      <div class="pills">${QUICK_LOC.map(k => chip(loc.has(k), `data-q="tog" data-k="location" data-v="${k}"`, L.location[k])).join('')}
+        ${QUICK_CHAR.map(k => chip(ch.has(k), `data-q="tog" data-k="character" data-v="${k}"`, L.character[k])).join('')}</div>
+      <h3>Что ещё</h3>
+      <div class="pills">${QUICK_SYM.map(k => chip(sym.has(k), `data-q="tog" data-k="symptoms" data-v="${k}"`, L.symptoms[k][0].replace(/ \(.*\)/, ''))).join('')}
+        ${ctx.trackCycle ? chip(!!ctx.today.period, 'data-q="period"', `Менструация${ctx.periodLikely ? ' · ожидается' : ''}`) : ''}</div>
+      <p class="qs-verdict">${verdict}</p>
+      <h3>Началась${a.start_time ? ` · в ${a.start_time}` : ''}</h3>
+      <div class="pills">${START_AGO.map(([m, t]) => chip(startPick === m, `data-q="start" data-m="${m}"`, t)).join('')}</div>
+      <h3>Насколько мешает</h3>
+      <div class="pills">${L.disability.map((t, i) => chip(a.disability === i, `data-q="dis" data-v="${i}"`, t)).join('')}</div>`;
+  }
+  const y = $sheet.querySelector('.qs-panel')?.scrollTop || 0;
+  $sheet.innerHTML = `<div class="qs-back" data-q="close"></div>
+    <div class="qs-panel" role="dialog" aria-modal="true" aria-label="Быстрая запись боли" tabindex="-1">
+      <div class="spread qs-top"><b>${head}</b><button class="ghost" data-q="close" aria-label="Закрыть">✕</button></div>
+      <div class="qs-val"><b id="qsNum">${v ?? '–'}</b><span id="qsWord">${v ? INTENSITY_WORDS[v] : 'от 1 до 10'}</span></div>
+      <div class="scale ${v ? '' : 'empty'}" id="scale" role="slider" tabindex="0" aria-label="Сила боли от 1 до 10" aria-valuemin="1" aria-valuemax="10" aria-valuenow="${v || 0}">
+        <i class="rest" style="width:${100 - (v || 0) * 10}%"></i><i class="knob" style="left:calc(${(v || 0) * 10}% - 24px);${v ? '' : 'display:none'}"></i>
+      </div>
+      <div class="spread qs-ends"><span>слабая</span><span>невыносимая</span></div>
+      <p class="qs-hint">${hint}</p>
+      ${details}
+      <div class="qs-foot">${a ? `<button class="primary" data-q="close">Готово</button><a class="btn" href="#log/${today()}/yes" data-q="go">Все подробности</a>` : '<button data-q="close">Закрыть</button>'}</div>
+      ${qs.undo !== undefined ? `<button class="ghost wide" data-q="undo">${qs.undoText}</button>` : ''}
+      ${a ? '<p class="qs-auto">Время, погода и день цикла записываются сами. Сон и факторы можно добавить вечером.</p>' : ''}
+    </div>`;
+  $sheet.querySelector('.qs-panel').scrollTop = y;
+  bindScale();
+}
+
+function bindScale() {
+  const sc = document.getElementById('scale');
+  const valAt = e => { const r = sc.getBoundingClientRect(); return Math.min(10, Math.max(1, Math.ceil((e.clientX - r.left) / r.width * 10))); };
+  const show = v => {
+    document.getElementById('qsNum').textContent = v ?? '–';
+    document.getElementById('qsWord').textContent = v ? INTENSITY_WORDS[v] : 'от 1 до 10';
+    sc.querySelector('.rest').style.width = `${100 - (v || 0) * 10}%`;
+    const k = sc.querySelector('.knob');
+    k.style.left = `calc(${(v || 0) * 10}% - 24px)`;
+    k.style.display = v ? '' : 'none';
+    sc.setAttribute('aria-valuenow', v || 0);
+    sc.classList.toggle('empty', !v);
+  };
+  let dragging = false, picked = null;
+  sc.onpointerdown = e => { dragging = true; sc.setPointerCapture(e.pointerId); picked = valAt(e); show(picked); };
+  sc.onpointermove = e => { if (dragging) { picked = valAt(e); show(picked); } };
+  sc.onpointerup = () => { if (!dragging) return; dragging = false; commitPain(picked); };
+  sc.onpointercancel = () => { dragging = false; show(qs.value); };
+  sc.onkeydown = e => {
+    const step = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+    if (step) { e.preventDefault(); picked = Math.min(10, Math.max(1, (picked ?? qs.value ?? 5) + step)); show(picked); }
+    else if ((e.key === 'Enter' || e.key === ' ') && picked) { e.preventDefault(); commitPain(picked); }
+  };
+}
+
+async function refreshQuick() {
+  qs.ctx.today = (await api.day(today())).day;
+  drawQuick();
+}
+
+async function commitPain(v) {
+  if (!v) return;
+  const res = await api.logPain(v);
+  // Undo is for a swipe that started an attack or reopened one; adjusting the strength needs only another swipe.
+  if (qs.undo === undefined && qs.mode !== 'open') { qs.undo = res.before; qs.undoText = qs.mode === 'new' ? 'Отменить эту запись' : 'Отменить: боль не вернулась'; }
+  qs.mode = 'open';
+  qs.ctx.today = (await api.day(today())).day;
+  qs.value = qs.ctx.today.attacks[0].intensity; // after a return the peak stays the higher of the two
+  toast(res.recurred ? `Отмечено: боль вернулась (пик — ${qs.value})` : `Записано: ${v} из 10`);
+  drawQuick();
+}
+
+async function quickAction(el) {
+  const a = qs.ctx.today?.attacks[0], d = today();
+  switch (el.dataset.q) {
+    case 'close': closeQuick(); return;
+    case 'go': closeQuick(false); return; // the link itself navigates
+    case 'undo':
+      await api.restoreDay(d, qs.undo);
+      toast('Запись отменена');
+      closeQuick();
+      return;
+    case 'med': {
+      const id = Number(el.dataset.id);
+      if (qs.added.has(id)) { await api.removeDose(d, id, qs.added.get(id)); qs.added.delete(id); }
+      else qs.added.set(id, await api.addDose(d, id));
+      break;
+    }
+    case 'usual': {
+      const t = qs.ctx.typical, un = (x, y) => [...new Set([...x, ...y])];
+      await api.patchAttack(d, { location: un(a.location, t.location), character: un(a.character, t.character), symptoms: un(a.symptoms, t.symptoms) });
+      break;
+    }
+    case 'tog': {
+      const k = el.dataset.k, val = el.dataset.v;
+      const list = a[k].includes(val) ? a[k].filter(x => x !== val) : [...a[k], val];
+      await api.patchAttack(d, { [k]: list });
+      break;
+    }
+    case 'period': await api.setPeriod(d, !qs.ctx.today.period); qs.ctx.periodLikely = false; break;
+    case 'start': await api.patchAttack(d, { start_time: minusMinutes(Number(el.dataset.m)) }); break;
+    case 'dis': { const v = Number(el.dataset.v); await api.patchAttack(d, { disability: a.disability === v ? null : v }); break; }
+    default: return;
+  }
+  await refreshQuick();
+}
+
+$sheet.addEventListener('click', e => {
+  const el = e.target.closest('[data-q]');
+  if (el && qs) quickAction(el).catch(err => toast(err.message));
 });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && qs) closeQuick(); });
+document.getElementById('fab').addEventListener('click', () => openQuick().catch(err => toast(err.message)));
 
 // ---------- my data ----------
 
@@ -1034,9 +1267,9 @@ async function renderSettings() {
   const [s, list] = await Promise.all([api.settings(), api.meds(), prepareBackup()]);
   CFG = await api.config();
   const aiDays = Number(pref.get('ai_days', 90));
-  let aiText = await api.aiPrompt(addDays(today(), -(aiDays - 1)), today());
+  // The AI request and the CSV take a moment to build; the screen shows first and they get ready behind it.
+  let aiText = null, csv = null;
   meds = list;
-  const csv = await api.csv();
   $view.innerHTML = `
     <h1>Настройки</h1>
     <h3>Оформление</h3>
@@ -1121,11 +1354,11 @@ async function renderSettings() {
       ${s.has_pin ? '<button class="ghost danger wide" id="pinOff" style="margin-top:8px">Выключить код</button>' : ''}
     </div>
 
-    <h3>Режим приступа</h3>
+    <h3>Быстрая запись боли</h3>
     <div class="card">
       <label class="field" style="margin-top:0"><span>Насколько приглушать экран</span>
-        <input type="range" class="plain" id="attackDim" min="0" max="0.5" step="0.05" value="${pref.get('attack_dim', 0.2)}" aria-label="Приглушение экрана в режиме приступа"></label>
-      <p class="muted">Вправо — темнее. Действует только в режиме «Болит сейчас».</p>
+        <input type="range" class="plain" id="attackDim" min="0" max="0.5" step="0.05" value="${pref.get('attack_dim', 0.2)}" aria-label="Приглушение экрана в быстрой записи"></label>
+      <p class="muted">Вправо — темнее. Действует, пока открыта шкала боли.</p>
     </div>
 
     <h3>Резервная копия</h3>
@@ -1261,12 +1494,20 @@ async function renderSettings() {
     toast('Все данные удалены');
     location.hash = '#diary';
   };
-  $('aiDays').onchange = async () => {
+  const prepareAi = async n => {
+    aiText = null;
+    $('aiCopy').disabled = true;
+    const text = await api.aiPrompt(addDays(today(), -(n - 1)), today());
+    if (Number($('aiDays')?.value) === n) { aiText = text; $('aiCopy').disabled = false; }
+  };
+  prepareAi(aiDays).catch(err => toast(err.message));
+  api.csv().then(t => { csv = t; }).catch(() => { });
+  $('aiDays').onchange = () => {
     pref.set('ai_days', $('aiDays').value);
-    const n = Number($('aiDays').value);
-    aiText = await api.aiPrompt(addDays(today(), -(n - 1)), today());
+    prepareAi(Number($('aiDays').value)).catch(err => toast(err.message));
   };
   $('aiCopy').onclick = async () => {
+    if (!aiText) return toast('Ещё готовлю текст — секунду');
     try { await navigator.clipboard.writeText(aiText); toast('Скопировано — вставьте в чат с ИИ'); } catch { toast('Не удалось скопировать'); }
   };
   $('backup').onclick = () => saveBackup().catch(err => toast(err.message));
@@ -1292,7 +1533,9 @@ async function renderSettings() {
     try { await saveHealth(await navigator.clipboard.readText()); } catch { toast('Не получилось прочитать буфер — вставьте текст в поле'); }
   };
   $('healthSave').onclick = () => saveHealth($('healthText').value);
-  $('exportCsv').onclick = () => shareFile(`дневник-${today()}.csv`, csv, 'text/csv').catch(err => toast(err.message));
+  $('exportCsv').onclick = async () => {
+    try { await shareFile(`дневник-${today()}.csv`, csv ?? await api.csv(), 'text/csv'); } catch (err) { toast(err.message); }
+  };
 }
 
 // ---------- boot ----------

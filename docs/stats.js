@@ -44,6 +44,23 @@ export function isMigraine(a) {
   return c >= 2 && d;
 }
 
+/**
+ * Her usual attack: what was noted in at least half of the last 10 described attacks.
+ * Offered as one "как обычно" tap in the quick log; null until 3 attacks are described.
+ */
+export function typicalAttack(days) {
+  const recent = days.flatMap(d => d.attacks)
+    .filter(a => a.location.length || a.character.length || a.symptoms.length).slice(-10);
+  if (recent.length < 3) return null;
+  const common = key => {
+    const c = new Map();
+    for (const a of recent) for (const v of new Set(a[key])) c.set(v, (c.get(v) || 0) + 1);
+    return [...c].filter(([, n]) => n / recent.length >= 0.5).sort((a, b) => b[1] - a[1]).map(([v]) => v);
+  };
+  const t = { location: common('location'), character: common('character'), symptoms: common('symptoms'), of: recent.length };
+  return t.location.length || t.character.length || t.symptoms.length ? t : null;
+}
+
 /** Distinct days with acute medication over the 30 days ending at `end`. */
 export function overuse(days, medsById, end) {
   end = [end, today()].sort()[0];
