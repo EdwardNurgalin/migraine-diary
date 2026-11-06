@@ -784,6 +784,8 @@ function overuseText(o) {
   return `${labels[key]} <b class="${x.status}">${x.days} из ${x.limit}</b> дн.`;
 }
 
+const calWheel = { acc: 0, locked: false, timer: 0 };
+
 async function renderCalendar(ym) {
   const [data, cyc] = await Promise.all([api.month(ym), api.cycle()]);
   const pr = calPrefs();
@@ -827,13 +829,16 @@ async function renderCalendar(ym) {
   };
   area.addEventListener('pointerup', end);
   area.addEventListener('pointercancel', () => { sx = null; area.style.transform = ''; });
-  let wheelX = 0, wheelLock = false;
   area.addEventListener('wheel', e => {
     if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
     e.preventDefault();
-    if (wheelLock) return;
-    wheelX += e.deltaX;
-    if (Math.abs(wheelX) > 60) { wheelLock = true; flip(wheelX > 0 ? 1 : -1); wheelX = 0; }
+    // A trackpad swipe keeps sending events for a while (inertia), also after the new month is drawn.
+    // One gesture = one month: stay locked until the events stop for a moment.
+    clearTimeout(calWheel.timer);
+    calWheel.timer = setTimeout(() => { calWheel.locked = false; calWheel.acc = 0; }, 350);
+    if (calWheel.locked) return;
+    calWheel.acc += e.deltaX;
+    if (Math.abs(calWheel.acc) > 60) { calWheel.locked = true; flip(calWheel.acc > 0 ? 1 : -1); }
   }, { passive: false });
   area.addEventListener('click', e => { if (area.dataset.swiped) { e.stopPropagation(); e.preventDefault(); delete area.dataset.swiped; } }, true);
   $view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { pref.set('cal_view', b.dataset.view); renderCalendar(ym); });
