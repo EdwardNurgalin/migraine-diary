@@ -1,16 +1,27 @@
-"""Draws the app icons (teal square, white page with a pulse line) without any image libraries."""
+"""Draws the app icon "Созвездие" without any image libraries.
+
+Days are stars joined by a thin line, like the trend chart; one day is a warm star with a soft ring.
+Everything sits inside the central safe zone, so iOS rounding and Android masks never cut it.
+"""
 import math
 import struct
 import sys
 import zlib
 from pathlib import Path
 
-TEAL = (42, 140, 130)
-WHITE = (255, 255, 255)
 OUT = Path(__file__).resolve().parent.parent / "docs" / "icons"
 
-# Pulse line across the page, in unit coordinates.
-PULSE = [(0.30, 0.56), (0.42, 0.56), (0.48, 0.42), (0.55, 0.70), (0.61, 0.50), (0.66, 0.56), (0.72, 0.56)]
+BG = (23, 32, 36)          # #172024, deep night green
+LINE = (143, 185, 160)     # #8fb9a0, the app's calm green
+STAR = (201, 216, 207)     # #c9d8cf
+WARM = (210, 154, 116)     # #d29a74, the pain colour
+
+# The drawing in a 120-unit square (same as the approved sketch).
+PATH = [(22, 78), (40, 62), (56, 70), (70, 40), (86, 58), (100, 50)]
+SMALL = [(22, 78), (40, 62), (56, 70), (86, 58), (100, 50)]
+WARM_C, WARM_R, RING_R = (70, 40), 7.5, 12.5
+LINE_W, RING_W, SMALL_R = 2.4, 1.6, 3.4
+DY = 5.5  # the sketch sits high; this centres the drawing (ring top 27.5 to lowest star 81.4)
 
 
 def seg_dist(px, py, a, b):
@@ -20,32 +31,37 @@ def seg_dist(px, py, a, b):
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def mix(base, top, alpha):
+    return tuple(b + (t - b) * alpha for b, t in zip(base, top))
+
+
 def pixel(x, y):
-    # Rounded white "card" in the middle (safe zone for maskable icons).
-    cx, cy, hw, hh, r = 0.5, 0.5, 0.26, 0.30, 0.06
-    qx, qy = max(abs(x - cx) - (hw - r), 0), max(abs(y - cy) - (hh - r), 0)
-    inside = math.hypot(qx, qy) <= r
-    if not inside:
-        return TEAL
-    if any(seg_dist(x, y, PULSE[i], PULSE[i + 1]) < 0.022 for i in range(len(PULSE) - 1)):
-        return TEAL
-    # Two short "text" lines above the pulse.
-    for ly, lx2 in ((0.33, 0.62), (0.40, 0.52)):
-        if abs(y - ly) < 0.012 and 0.33 <= x <= lx2:
-            return (190, 220, 216)
-    return WHITE
+    """Colour at a point given in 120-unit coordinates; layers are painted bottom to top."""
+    y -= DY
+    c = BG
+    if any(seg_dist(x, y, PATH[i], PATH[i + 1]) <= LINE_W / 2 for i in range(len(PATH) - 1)):
+        c = mix(c, LINE, 0.6)
+    d = math.hypot(x - WARM_C[0], y - WARM_C[1])
+    if abs(d - RING_R) <= RING_W / 2:
+        c = mix(c, WARM, 0.45)
+    if any(math.hypot(x - sx, y - sy) <= SMALL_R for sx, sy in SMALL):
+        c = STAR
+    if d <= WARM_R:
+        c = WARM
+    return c
 
 
 def png(size):
-    ss = 3  # supersampling for smooth edges
+    ss = 4  # supersampling for smooth edges
+    k = 120 / size
     rows = []
     for j in range(size):
         row = bytearray([0])
         for i in range(size):
-            acc = [0, 0, 0]
+            acc = [0.0, 0.0, 0.0]
             for sj in range(ss):
                 for si in range(ss):
-                    c = pixel((i + (si + 0.5) / ss) / size, (j + (sj + 0.5) / ss) / size)
+                    c = pixel((i + (si + 0.5) / ss) * k, (j + (sj + 0.5) / ss) * k)
                     acc = [a + b for a, b in zip(acc, c)]
             row += bytes(round(a / ss / ss) for a in acc)
         rows.append(bytes(row))
