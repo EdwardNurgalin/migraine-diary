@@ -52,6 +52,45 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
+// The app's own dialog. The system confirm and prompt are unreliable in a Home Screen app, and some browsers
+// answer "no" without showing anything, so every question goes through this.
+function ask(text, { ok = 'Да', cancel = 'Отмена', danger = false, input = null } = {}) {
+  return new Promise(resolve => {
+    const box = document.createElement('div');
+    box.className = 'dialog';
+    box.innerHTML = `<div class="dlg-back"></div>
+      <div class="dlg" role="alertdialog" aria-modal="true">
+        <p>${esc(text)}</p>
+        ${input ? `<input class="dlg-in" placeholder="${esc(input)}" autocomplete="off">` : ''}
+        <div class="dlg-btns"><button data-a="0">${esc(cancel)}</button><button data-a="1" class="${danger ? 'dangerbtn' : 'primary'}">${esc(ok)}</button></div>
+      </div>`;
+    document.body.append(box);
+    const field = box.querySelector('.dlg-in');
+    const done = yes => { box.remove(); document.removeEventListener('keydown', key); resolve(input ? (yes ? field.value : null) : yes); };
+    const key = e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); };
+    document.addEventListener('keydown', key);
+    box.querySelector('.dlg-back').onclick = () => done(false);
+    box.querySelectorAll('[data-a]').forEach(b => b.onclick = () => done(b.dataset.a === '1'));
+    (field || box.querySelector('[data-a="1"]')).focus();
+  });
+}
+
+// Clipboard API first; the old select-and-copy way when the browser refuses it.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+  document.body.append(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
 // Opened from the Home Screen icon (not a Safari tab). On iPhone these two have separate storage.
 const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 
@@ -141,7 +180,7 @@ function renderLock() {
       }
     });
     document.getElementById('forgot').onclick = async () => {
-      if (!confirm('Код можно сбросить только вместе со всеми данными на этом телефоне. Если есть резервная копия, её можно будет восстановить. Сбросить?')) return;
+      if (!await ask('Код можно сбросить только вместе со всеми данными на этом телефоне. Если есть резервная копия, её можно будет восстановить. Сбросить?', { ok: 'Сбросить', danger: true })) return;
       await api.deleteAll();
       unlocked = true;
       CFG = null;
@@ -198,17 +237,22 @@ const daysFrom = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000);
 
 async function renderDiary(d) {
   const isToday = d === today();
-  const end = [addDays(d, 3), today()].sort()[0], start = addDays(end, -6);
+  // The strip scrolls sideways a week at a time: the current week and 7 before it (more if an older day is open).
+  const monday = x => addDays(x, -((parseISO(x).getDay() + 6) % 7));
+  const end = addDays(monday(today()), 6), start = [addDays(monday(today()), -49), monday(d)].sort()[0];
   const [day, s, set, pending, h] = await Promise.all([
     api.day(d), api.summary(start, end), api.settings(), api.pendingEffects(), isToday ? api.home() : null,
   ]);
   const backupDue = s.logged_days > 0 && (!set.last_backup || Date.now() - set.last_backup > BACKUP_EVERY_MS);
   if (backupDue) await prepareBackup();
-  const strip = s.series.map(p => {
-    const dt = parseISO(p.date);
-    return `<a href="#diary/${p.date}" aria-label="${fmtDate(p.date)}${p.type ? ', ' + L.types[p.type] : ', не заполнен'}">
-      <span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span>${dayMark(p, { selected: p.date === d })}</a>`;
-  }).join('');
+  const cell = p => {
+    const dt = parseISO(p.date), inner = `<span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span>${dayMark(p, { selected: p.date === d })}`;
+    return p.date > today() ? `<span class="wd">${inner}</span>`
+      : `<a class="wd" href="#diary/${p.date}" aria-label="${fmtDate(p.date)}${p.type ? ', ' + L.types[p.type] : ', не заполнен'}">${inner}</a>`;
+  };
+  const weeks = [];
+  for (let i = 0; i < s.series.length; i += 7) weeks.push(s.series.slice(i, i + 7));
+  const strip = weeks.map(w => `<div class="wk" data-wk="${w[0].date}">${w.map(cell).join('')}</div>`).join('');
   const dt = parseISO(d);
   const title = isToday ? 'Сегодня' : d === addDays(today(), -1) ? 'Вчера' : fmtDate(d);
 
@@ -218,7 +262,7 @@ async function renderDiary(d) {
     ${showInstallHint() ? `<div class="banner warn hint"><button class="ghost" data-hide-hint aria-label="Скрыть подсказку">✕</button>
       <b>Добавьте дневник на экран «Домой»</b>
       <p style="font-size:14px">«Поделиться» → «На экран „Домой“». Дальше открывайте иконку: записи из вкладки Safari в ней не появятся.</p></div>` : ''}
-    <div class="weekstrip">${strip}<a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
+    <div class="weekstrip"><div class="weeks" aria-label="Дни, листаются влево и вправо">${strip}</div><a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
     ${pending.map(x => `<div class="card effcard"><div>Помог ли ${esc(x.name)}, принятый ${x.date === today() ? '' : 'вчера '}в ${x.time}?</div>
       <div class="effbtns">${Object.entries(L.effects).map(([k, v]) => `<button data-eff="${k}" data-date="${x.date}" data-ai="${x.ai}" data-di="${x.di}">${v}</button>`).join('')}</div></div>`).join('')}
     ${statusCard(day, h)}
@@ -228,6 +272,8 @@ async function renderDiary(d) {
       <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
       <button class="primary" data-backup style="margin-top:6px">Сохранить копию</button></div>` : ''}`;
 
+  const weeksEl = $view.querySelector('.weeks'), cur = weeksEl.querySelector(`[data-wk="${monday(d)}"]`);
+  weeksEl.scrollLeft = cur.offsetLeft - weeksEl.offsetLeft;
   const again = () => renderDiary(d).catch(err => toast(err.message));
   $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
   $view.querySelectorAll('[data-eff]').forEach(b => b.onclick = async () => {
@@ -430,15 +476,74 @@ function factorRow(f, v) {
     ${factorControl(f, v)}</div>`;
 }
 
-// Hours and minutes as two lists, so time is always 24-hour whatever the phone's region settings.
+// Time is a button; tapping it opens drums like the iPhone alarm clock, always 24-hour.
 function timeField(path, value, label = '') {
-  const [h, m] = value ? value.split(':') : ['', ''];
-  const mins = [...new Set([...Array.from({ length: 12 }, (_, i) => pad(i * 5)), ...(m ? [m] : [])])].sort();
-  const opt = (x, cur) => `<option ${x === cur ? 'selected' : ''}>${x}</option>`;
-  return `${label ? `<span class="tlabel">${label}</span>` : ''}<div class="tfield" data-path="${path}">
-    <select data-time="h" aria-label="${label || 'Время'}: часы"><option value="">--</option>${Array.from({ length: 24 }, (_, i) => opt(pad(i), h)).join('')}</select>
-    <b>:</b>
-    <select data-time="m" aria-label="${label || 'Время'}: минуты"><option value="">--</option>${mins.map(x => opt(x, m)).join('')}</select></div>`;
+  return `${label ? `<span class="tlabel">${label}</span>` : ''}<button type="button" class="tbtn ${value ? '' : 'empty'}" data-time-path="${path}" data-label="${esc(label || 'Время')}">${value || '--:--'}</button>`;
+}
+
+const ROW = 44, LOOPS = 7; // each drum repeats its numbers 7 times and quietly re-centres, so it scrolls round endlessly
+function drum(n, cur) {
+  const mid = Math.floor(LOOPS / 2) * n;
+  const items = Array.from({ length: n * LOOPS }, (_, i) => `<div data-i="${i}">${pad(i % n)}</div>`).join('');
+  return { html: `<div class="tp-col" data-n="${n}" tabindex="0"><div class="tp-pad"></div>${items}<div class="tp-pad"></div></div>`, start: mid + cur };
+}
+
+/** Resolves to "HH:MM", "" when cleared, or null when cancelled. */
+function pickTime(title, value, fallback) {
+  return new Promise(resolve => {
+    const [h0, m0] = (value || fallback || nowTime()).split(':').map(Number);
+    const hd = drum(24, h0), md = drum(60, m0);
+    const box = document.createElement('div');
+    box.innerHTML = `<div class="dlg-back"></div>
+      <div class="tp" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+        <div class="tp-head"><button class="ghost" data-tp="cancel">Отмена</button><b>${esc(title)}</b><button class="ghost tp-ok" data-tp="ok">Готово</button></div>
+        <div class="tp-wheels"><i class="tp-band"></i>${hd.html}<span class="tp-colon">:</span>${md.html}</div>
+        <div class="tp-extra"><button data-tp="now">Сейчас</button><button data-tp="clear">Очистить</button></div>
+      </div>`;
+    document.body.append(box);
+    const cols = [...box.querySelectorAll('.tp-col')];
+    const value_ = col => Math.round(col.scrollTop / ROW) % Number(col.dataset.n);
+    const mark = col => {
+      const i = Math.round(col.scrollTop / ROW);
+      col.querySelector('.on')?.classList.remove('on');
+      col.querySelector(`[data-i="${i}"]`)?.classList.add('on');
+    };
+    const setTo = (col, v, smooth = false) => {
+      const n = Number(col.dataset.n);
+      col.scrollTo({ top: (Math.floor(LOOPS / 2) * n + v) * ROW, behavior: smooth ? 'smooth' : 'auto' });
+      mark(col);
+    };
+    cols.forEach((col, k) => {
+      setTo(col, k ? m0 : h0);
+      let timer;
+      col.addEventListener('scroll', () => {
+        mark(col);
+        clearTimeout(timer);
+        timer = setTimeout(() => { // settled: jump back to the middle copy if close to an end
+          const n = Number(col.dataset.n), i = Math.round(col.scrollTop / ROW);
+          if (i < n * 2 || i >= n * (LOOPS - 2)) setTo(col, i % n);
+        }, 140);
+      });
+      col.addEventListener('click', e => {
+        const it = e.target.closest('[data-i]');
+        if (it) col.scrollTo({ top: Number(it.dataset.i) * ROW, behavior: 'smooth' });
+      });
+      col.addEventListener('keydown', e => {
+        const d = { ArrowUp: -1, ArrowDown: 1 }[e.key];
+        if (d) { e.preventDefault(); col.scrollBy({ top: d * ROW }); }
+      });
+    });
+    const done = v => { box.remove(); resolve(v); };
+    box.querySelector('.dlg-back').onclick = () => done(null);
+    box.querySelectorAll('[data-tp]').forEach(b => b.onclick = () => {
+      const a = b.dataset.tp;
+      if (a === 'cancel') done(null);
+      else if (a === 'clear') done('');
+      else if (a === 'ok') done(`${pad(value_(cols[0]))}:${pad(value_(cols[1]))}`);
+      else { const [h, m] = nowTime().split(':').map(Number); setTo(cols[0], h, true); setTo(cols[1], m, true); }
+    });
+    cols[0].focus();
+  });
 }
 
 const sleepHours = (a, b) => {
@@ -574,7 +679,7 @@ async function wizardAction(el) {
   const f = el.dataset.k && factorDef(el.dataset.k);
   switch (act) {
     case 'close':
-      if (wz.dirty && !confirm('Выйти без сохранения?')) return;
+      if (wz.dirty && !await ask('Выйти без сохранения? Изменения пропадут.', { ok: 'Выйти', cancel: 'Остаться', danger: true })) return;
       wz.dirty = false;
       location.hash = `#diary/${wz.date}`;
       return;
@@ -589,7 +694,7 @@ async function wizardAction(el) {
       location.hash = `#diary/${wz.date}`;
       return;
     case 'delete':
-      if (!confirm(`Удалить всю запись за ${fmtDate(wz.date)}?`)) return;
+      if (!await ask(`Удалить всю запись за ${fmtDate(wz.date)}?`, { ok: 'Удалить', danger: true })) return;
       await api.deleteDay(wz.date);
       wz.dirty = false;
       toast('Запись удалена');
@@ -632,21 +737,24 @@ $view.addEventListener('click', e => {
   });
 });
 
+$view.addEventListener('click', async e => {
+  const b = e.target.closest('[data-time-path]');
+  if (!b || !wz) return;
+  const path = b.dataset.timePath;
+  const fallback = { sleep_start: '23:00', sleep_end: '07:00' }[path];
+  const v = await pickTime(b.dataset.label, getPath(wz.draft, path), fallback);
+  if (v == null || !wz) return;
+  setPath(wz.draft, path, v);
+  wz.dirty = true;
+  if (path.startsWith('sleep_')) {
+    const h = sleepHours(wz.draft.sleep_start, wz.draft.sleep_end);
+    wz.draft.sleep_hours = h ?? wz.draft.sleep_hours;
+  }
+  redraw();
+});
+
 $view.addEventListener('input', e => {
   const el = e.target;
-  const tf = el.closest('.tfield');
-  if (wz && tf) {
-    const [hs, ms] = tf.querySelectorAll('select');
-    if (hs.value && !ms.value) ms.value = '00';
-    setPath(wz.draft, tf.dataset.path, hs.value ? `${hs.value}:${ms.value}` : '');
-    wz.dirty = true;
-    if (tf.dataset.path.startsWith('sleep_')) {
-      const h = sleepHours(wz.draft.sleep_start, wz.draft.sleep_end);
-      if (h != null) wz.draft.sleep_hours = h;
-      document.getElementById('sleepDur').textContent = h != null ? `Сон: ${fmtHours(h)}` : 'Укажите, когда заснули и проснулись';
-    }
-    return;
-  }
   if (!wz || !el.dataset.path) return;
   const v = el.dataset.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value;
   setPath(wz.draft, el.dataset.path, v);
@@ -691,9 +799,25 @@ async function renderCalendar(ym) {
       <button data-view="month" class="${pr.view === 'month' ? 'on' : ''}">Месяц</button>
       <button data-view="list" class="${pr.view === 'list' ? 'on' : ''}">Хронология</button>
     </div>
-    ${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}`;
+    <div class="calarea">${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}</div>`;
 
   $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
+  // Swipe left or right anywhere on the month to change it.
+  const area = $view.querySelector('.calarea');
+  let sx = null, sy = 0;
+  area.addEventListener('pointerdown', e => { sx = e.clientX; sy = e.clientY; });
+  area.addEventListener('pointercancel', () => { sx = null; });
+  area.addEventListener('pointerup', e => {
+    if (sx == null) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    sx = null;
+    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    area.dataset.swiped = '1';
+    if (dx > 0) location.hash = `#calendar/${prev}`;
+    else if (next <= t.slice(0, 7)) location.hash = `#calendar/${next}`;
+  });
+  // A swipe must not also count as a tap on a day.
+  area.addEventListener('click', e => { if (area.dataset.swiped) { e.stopPropagation(); e.preventDefault(); delete area.dataset.swiped; } }, true);
   $view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { pref.set('cal_view', b.dataset.view); renderCalendar(ym); });
   $view.querySelectorAll('[data-cal-toggle]').forEach(b => b.onclick = () => {
     const k = b.dataset.calToggle;
@@ -975,7 +1099,7 @@ function overuseBanner(o) {
 }
 
 function chart(series) {
-  const W = 600, H = 170, top = 8, bottom = 18, n = series.length;
+  const W = 600, H = 186, top = 8, bottom = 34, n = series.length;
   const bw = W / n, ph = H - top - bottom;
   const ps = series.map(p => p.pressure).filter(v => v != null);
   const pmin = Math.min(...ps), pmax = Math.max(...ps), pr = Math.max(pmax - pmin, 1);
@@ -985,8 +1109,16 @@ function chart(series) {
     return `<rect x="${i * bw + bw * 0.15}" y="${top + ph - h}" width="${Math.max(bw * 0.7, 1)}" height="${h}" rx="2" fill="${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"><title>${fmtDate(p.date)}: ${p.intensity}/10</title></rect>`;
   }).join('');
   const line = ps.length > 1 ? `<polyline fill="none" stroke="var(--muted)" stroke-opacity=".8" stroke-width="1.5" stroke-linejoin="round" points="${series.map((p, i) => p.pressure == null ? null : `${i * bw + bw / 2},${top + ph - (p.pressure - pmin) / pr * ph}`).filter(Boolean).join(' ')}"/>` : '';
+  // Dates under the bars, like 8.11 · 13.11 · 18.11: about six labels whatever the period.
+  const every = Math.max(1, Math.ceil(n / 6));
+  const axis = series.map((p, i) => {
+    if ((n - 1 - i) % every) return '';
+    const x = Math.min(Math.max(i * bw + bw / 2, 22), W - 22);
+    return `<rect x="${i * bw + bw / 2 - 0.5}" y="${top + ph}" width="1" height="5" fill="var(--line)"/>
+      <text x="${x}" y="${H - 6}" text-anchor="middle" font-size="19" fill="var(--muted)">${Number(p.date.slice(8))}.${p.date.slice(5, 7)}</text>`;
+  }).join('');
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Сила боли по дням и атмосферное давление">
-    <rect x="0" y="${top + ph}" width="${W}" height="1" fill="var(--line)"/>${bars}${line}</svg>
+    <rect x="0" y="${top + ph}" width="${W}" height="1" fill="var(--line)"/>${bars}${line}${axis}</svg>
     <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span>
       <span>— давление ${ps.length ? `${Math.round(pmin)}–${Math.round(pmax)} гПа` : '(укажите город)'}</span></div>`;
 }
@@ -1152,6 +1284,12 @@ async function renderSurvey(type) {
     });
     document.getElementById('surveySave').onclick = async () => {
       if (!def.options) surveyAnswers = surveyAnswers.map(v => v ?? 0);
+      const missing = surveyAnswers.findIndex(v => v == null);
+      if (missing >= 0) {
+        toast(`Ответьте на вопрос ${missing + 1}`);
+        $view.querySelectorAll('.card')[missing]?.scrollIntoView({ block: 'center' });
+        return;
+      }
       try {
         const r = await api.saveSurvey(type, surveyAnswers);
         toast(`${def.title}: ${r.score} — ${r.grade}`);
@@ -1172,7 +1310,7 @@ async function renderReport(from, to) {
     if (!a.start_time || !a.end_time) return '—';
     let m = (Number(a.end_time.slice(0, 2)) * 60 + Number(a.end_time.slice(3))) - (Number(a.start_time.slice(0, 2)) * 60 + Number(a.start_time.slice(3)));
     if (m < 0) m += 1440;
-    return `${Math.floor(m / 60)} ч ${pad(m % 60)} мин`;
+    return `${Math.floor(m / 60)} ч${m % 60 ? ` ${m % 60} мин` : ''}`;
   };
   const fl = s.factors.ready ? s.factors.items.filter(x => x.kind !== 'neutral') : [];
   $view.innerHTML = `
@@ -1184,9 +1322,9 @@ async function renderReport(from, to) {
       </div>
     </div>
     <div class="report">
-      <h1>Дневник головной боли</h1>
+      <div class="rhead"><h1>Дневник головной боли</h1>
       ${pr.birth_year || pr.diagnosis || pr.since || pr.doctor ? `<p>${[pr.birth_year && `Год рождения: ${esc(pr.birth_year)}`, pr.diagnosis && `Диагноз: ${esc(pr.diagnosis)}`, pr.since && `Головные боли с ${esc(pr.since)}`, pr.doctor && `Врач: ${esc(pr.doctor)}`].filter(Boolean).join(' · ')}</p>` : ''}
-      <p>Период: ${fmtDateFull(from)} — ${fmtDateFull(to)} (${s.total_days} дн, заполнено ${s.logged_days})</p>
+      <p>Период: ${fmtDateFull(from)} — ${fmtDateFull(to)} (${s.total_days} дн, заполнено ${s.logged_days})</p></div>
       <div class="card"><h2>Сводка</h2><table>
         <tr><td>Дней с головной болью</td><td><b>${s.headache_days}</b> (${pct(s.headache_days / s.total_days)} периода), из них похожих на мигрень: <b>${s.migraine_days}</b></td></tr>
         <tr><td>Дней без боли (заполненных)</td><td><b>${s.pain_free_days}</b></td></tr>
@@ -1219,7 +1357,7 @@ async function renderReport(from, to) {
       ${s.attacks.length ? `<table>
         <tr><th>Дата</th><th>Время</th><th>Длит.</th><th>Сила</th><th>Описание</th><th>Лекарства</th></tr>
         ${s.attacks.map(a => `<tr>
-          <td>${fmtDate(a.date)}${a.migraine ? '<br><i>мигренеподобный</i>' : ''}</td><td>${a.start_time || '—'}${a.end_time ? '–' + a.end_time : ''}</td><td>${dur(a)}</td><td>${a.intensity}${a.disability != null ? `<br><span class="muted">${L.disability[a.disability].toLowerCase()}</span>` : ''}${a.recurred ? '<br><span class="muted">вернулась</span>' : ''}</td>
+          <td>${fmtDate(a.date)}${a.migraine ? '<br><i>мигренеподобный</i>' : ''}</td><td class="nw">${a.start_time || '—'}${a.end_time ? '–<br>' + a.end_time : ''}</td><td class="nw">${dur(a)}</td><td>${a.intensity}${a.disability != null ? `<br><span class="muted">${L.disability[a.disability].toLowerCase()}</span>` : ''}${a.recurred ? '<br><span class="muted">вернулась</span>' : ''}</td>
           <td>${esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character), labelsOf(L.symptoms, a.symptoms)].filter(Boolean).join('; '))}${a.note ? `<br><i>${esc(a.note)}</i>` : ''}</td>
           <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? m.name + ' ' + m.dose : '?')}${x.time ? ' в ' + x.time : ''} — ${x.effect ? `через 2 ч: ${L.effects[x.effect].toLowerCase()}` : 'эффект не отмечен'}`; }).join('<br>') || '—'}</td>
         </tr>`).join('')}
@@ -1317,12 +1455,12 @@ async function renderSettings() {
 
     <h3>Мои лекарства</h3>
     <div class="list">${meds.filter(m => !m.deleted).map(m => `
-      <div class="frow"><span class="fic">💊</span><div class="fbody"><div class="flabel">${esc(m.name)} ${esc(m.dose)}</div>
+      <div class="frow medrow"><span class="fic">💊</span><div class="fbody">
+        <div class="spread"><div class="flabel">${esc(m.name)} ${esc(m.dose)}</div><button class="ghost danger" data-med-del="${m.id}">Удалить</button></div>
         <div class="fval">${L.kinds[m.kind]}${m.kind === 'preventive' && m.start_date ? ` · с ${fmtDate(m.start_date)}${m.stop_date ? ` по ${fmtDate(m.stop_date)}` : ''}` : ''}</div>
-        ${m.kind === 'preventive' ? `<div class="row" style="flex-wrap:nowrap;margin-top:8px">
-          <label class="field" style="flex:1;margin:0"><span>Начала</span><input type="date" data-prev-start="${m.id}" value="${m.start_date || ''}" max="${today()}"></label>
-          <label class="field" style="flex:1;margin:0"><span>Закончила</span><input type="date" data-prev-stop="${m.id}" value="${m.stop_date || ''}" max="${today()}"></label></div>` : ''}</div>
-        <button class="ghost danger" data-med-del="${m.id}">Удалить</button></div>`).join('') || '<div class="frow muted">Пока пусто</div>'}
+        ${m.kind === 'preventive' ? `<div class="prevdates">
+          <label class="field"><span>Начала</span><input type="date" data-prev-start="${m.id}" value="${m.start_date || ''}" max="${today()}"></label>
+          <label class="field"><span>Закончила</span><input type="date" data-prev-stop="${m.id}" value="${m.stop_date || ''}" max="${today()}"></label></div>` : ''}</div></div>`).join('') || '<div class="frow muted">Пока пусто</div>'}
     </div>
     <div class="card" style="margin-top:10px">
       <input id="mName" placeholder="Название, например «Суматриптан»" maxlength="80">
@@ -1445,7 +1583,7 @@ async function renderSettings() {
   };
   $view.querySelectorAll('[data-med-del]').forEach(b => b.onclick = async () => {
     const m = medById(Number(b.dataset.medDel));
-    if (!confirm(`Удалить «${m.name}»? В старых записях оно останется.`)) return;
+    if (!await ask(`Удалить «${m.name}»? В старых записях оно останется.`, { ok: 'Удалить', danger: true })) return;
     await api.deleteMed(m.id);
     meds = await api.meds();
     renderSettings();
@@ -1458,7 +1596,7 @@ async function renderSettings() {
   });
   $view.querySelectorAll('[data-rm-factor]').forEach(b => b.onclick = async e => {
     e.preventDefault();
-    if (!confirm('Удалить этот фактор? Уже сделанные записи сохранятся.')) return;
+    if (!await ask('Удалить этот фактор? Уже сделанные записи сохранятся.', { ok: 'Удалить', danger: true })) return;
     await api.removeFactor(b.dataset.rmFactor);
     renderSettings();
   });
@@ -1487,8 +1625,9 @@ async function renderSettings() {
   if ($('pinOff')) $('pinOff').onclick = async () => { await api.setPin(null); toast('Код выключен'); renderSettings(); };
   $('attackDim').oninput = e => pref.set('attack_dim', e.target.value);
   $('wipe').onclick = async () => {
-    if (!confirm('Удалить все записи, лекарства и настройки на этом телефоне?')) return;
-    if (prompt('Это нельзя отменить. Напишите «удалить», чтобы подтвердить.')?.trim().toLowerCase() !== 'удалить') return toast('Отменено');
+    if (!await ask('Удалить все записи, лекарства и настройки на этом телефоне?', { ok: 'Удалить', danger: true })) return;
+    const word = await ask('Это нельзя отменить. Напишите «удалить», чтобы подтвердить.', { ok: 'Удалить всё', danger: true, input: 'удалить' });
+    if (word?.trim().toLowerCase() !== 'удалить') return toast('Отменено');
     await api.deleteAll();
     ['theme', 'dim', 'attack_dim', 'cal_view', 'cal_meds', 'cal_cycle', 'ai_days', 'install_hint_hidden'].forEach(k => pref.del(k));
     applyTheme('moss');
@@ -1511,13 +1650,14 @@ async function renderSettings() {
   };
   $('aiCopy').onclick = async () => {
     if (!aiText) return toast('Ещё готовлю текст — секунду');
-    try { await navigator.clipboard.writeText(aiText); toast('Скопировано — вставьте в чат с ИИ'); } catch { toast('Не удалось скопировать'); }
+    if (await copyText(aiText)) toast('Скопировано — вставьте в чат с ИИ');
+    else toast('Не удалось скопировать');
   };
   $('backup').onclick = () => saveBackup().catch(err => toast(err.message));
   $('restoreBtn').onclick = () => $('restoreFile').click();
   $('restoreFile').onchange = async e => {
     const file = e.target.files[0];
-    if (!file || !confirm('Заменить все записи на этом телефоне данными из копии?')) return;
+    if (!file || !await ask('Заменить все записи на этом телефоне данными из копии?', { ok: 'Заменить', danger: true })) return;
     try {
       const n = await api.restore(await file.text());
       CFG = null;

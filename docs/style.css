@@ -94,11 +94,31 @@ label.field { display: block; margin: 10px 0; }
 label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
 .field { margin: 10px 0; }
 
-/* 24-hour time: two compact lists, hours and minutes */
-.tfield { display: flex; align-items: center; gap: 4px; }
-.tfield select { flex: 1; min-width: 0; text-align: center; text-align-last: center; padding: 10px 4px; }
-.tfield b { color: var(--muted); font-weight: 400; }
-.tcompact { width: 132px; flex: none; }
+/* 24-hour time: a button that opens the drum picker */
+.tbtn { width: 100%; font-size: 20px; font-variant-numeric: tabular-nums; padding: 10px 8px; letter-spacing: .5px; }
+.tbtn.empty { color: var(--faint); }
+.tcompact { width: 96px; flex: none; }
+.tp {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 81; max-width: 560px; margin: 0 auto;
+  background: var(--surface); border-radius: 20px 20px 0 0; padding: 8px 12px calc(16px + env(safe-area-inset-bottom));
+}
+.tp-head { display: flex; align-items: center; justify-content: space-between; }
+.tp-head b { font-weight: 500; }
+.tp-head .tp-ok { color: var(--accent); font-weight: 500; font-size: 17px; }
+.tp-head button { font-size: 17px; padding: 10px; }
+.tp-wheels { position: relative; display: flex; justify-content: center; align-items: center; gap: 6px; height: 220px; margin: 6px 0 10px; }
+.tp-band { position: absolute; left: 8px; right: 8px; top: 88px; height: 44px; border-radius: 12px; background: var(--surface-2); }
+.tp-col {
+  position: relative; width: 84px; height: 220px; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(transparent, #000 38%, #000 62%, transparent); mask-image: linear-gradient(transparent, #000 38%, #000 62%, transparent);
+  outline: none; overscroll-behavior: contain;
+}
+.tp-col::-webkit-scrollbar { display: none; }
+.tp-col .tp-pad { height: 88px; }
+.tp-col [data-i] { height: 44px; line-height: 44px; text-align: center; font-size: 24px; color: var(--muted); scroll-snap-align: center; font-variant-numeric: tabular-nums; cursor: pointer; }
+.tp-col [data-i].on { color: var(--text); font-size: 27px; }
+.tp-colon { position: relative; font-size: 26px; color: var(--text); }
+.tp-extra { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sleeprow .fbody .fval { margin-top: 2px; }
 
 /* ---- day marks shared by the week strip and the calendar ---- */
@@ -137,8 +157,12 @@ label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px;
 .crow .cpress.jump { color: var(--warn); }
 
 /* ---- diary home ---- */
-.weekstrip { display: grid; grid-template-columns: repeat(7, 1fr) 30px; align-items: end; gap: 2px; margin: 4px 0 22px; }
-.weekstrip a { text-decoration: none; color: var(--text); text-align: center; }
+.weekstrip { display: grid; grid-template-columns: 1fr 30px; align-items: end; gap: 2px; margin: 4px 0 22px; }
+.weeks { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain; }
+.weeks::-webkit-scrollbar { display: none; }
+.weeks .wk { flex: 0 0 100%; display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; scroll-snap-align: start; scroll-snap-stop: always; }
+.weekstrip .wd { text-decoration: none; color: var(--text); text-align: center; }
+.calarea { touch-action: pan-y; }
 .weekstrip .dn { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .weekstrip .num { width: min(38px, 10vw); height: min(38px, 10vw); }
 .weekstrip .calbtn { font-size: 22px; color: var(--muted); padding-bottom: 8px; }
@@ -218,7 +242,6 @@ input[type="range"]::-moz-range-thumb { width: 24px; height: 24px; border-radius
 .dose:last-child { border-bottom: 0; }
 .dose .row { flex-wrap: nowrap; }
 .dose select { flex: 1; min-width: 0; }
-.dose input[type="time"] { width: 110px; flex: none; }
 
 /* ---- tabs ---- */
 .tabs {
@@ -327,6 +350,7 @@ details.mod[open] .fval { color: var(--accent); }
 .report h1 { font-size: 22px; }
 .report .card { border: 1px solid var(--line); }
 .report table { font-size: 12.5px; }
+.report td.nw { white-space: nowrap; }
 .strip { display: flex; flex-wrap: wrap; gap: 2px; }
 .strip i { width: 12px; height: 12px; border-radius: 50%; background: var(--surface-2); }
 .strip i.t-none { background: var(--none); }
@@ -345,7 +369,20 @@ details.mod[open] .fval { color: var(--accent); }
   .report { padding: 0; }
   .report .card { border: 0; padding: 0; margin-bottom: 14px; break-inside: avoid; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { font-size: 10.5pt; line-height: 1.4; }
+  .report .rhead { border-bottom: 1.5pt solid var(--accent); padding-bottom: 8pt; margin-bottom: 14pt; }
+  .report .rhead h1 { font-size: 19pt; color: var(--accent); margin: 0 0 6pt; }
+  .report .rhead p { margin: 2pt 0; color: #444; }
+  .report h2 { font-size: 12.5pt; color: var(--accent); border-bottom: .75pt solid #d5d5d5; padding-bottom: 3pt; margin: 0 0 6pt; break-after: avoid; }
+  .report table { font-size: 9.5pt; }
+  .report th { background: #f3f3ef; }
+  .report th, .report td { padding: 4pt 5pt; }
+  .report tr { break-inside: avoid; }
+  .report .banner { padding: 8pt 11pt; border-radius: 6pt; break-inside: avoid; margin: 0 0 14pt; }
+  .report > .muted { margin-top: 16pt; font-size: 8.5pt; }
 }
+/* Page margins for "Печать / PDF": A4 with room around the text on every page. */
+@page { size: A4; margin: 15mm 14mm 16mm; }
 
 /* ---- home: two-hour check and risk ---- */
 .effcard .effbtns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
@@ -438,3 +475,23 @@ body.sheet-open { overflow: hidden; }
 .qs-foot > :only-child { grid-column: 1 / -1; }
 .qs-foot button, .qs-foot .btn { padding: 14px 8px; }
 .qs-auto { color: var(--faint); font-size: 12.5px; text-align: center; margin-top: 10px; }
+
+/* ---- the app's own dialog ---- */
+.dlg-back { position: fixed; inset: 0; background: rgba(0, 0, 0, .5); z-index: 80; }
+.dlg {
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 81; width: min(340px, calc(100% - 32px));
+  background: var(--surface); border-radius: 18px; padding: 18px 16px 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, .35);
+}
+.dlg p { margin: 0 0 14px; font-size: 16px; line-height: 1.4; }
+.dlg .dlg-in { margin-bottom: 14px; }
+.dlg-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.dlg-btns button { padding: 13px 8px; }
+button.dangerbtn { background: var(--over-bg); color: var(--over); font-weight: 500; }
+
+/* ---- settings: medicines ---- */
+.medrow { align-items: flex-start; }
+.medrow .fic { margin-top: 2px; }
+.medrow .spread button { padding: 4px 0 4px 8px; flex: none; }
+.prevdates { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.prevdates .field { margin: 0; min-width: 0; }
+.prevdates input { min-width: 0; padding: 9px 6px; font-size: 15px; }

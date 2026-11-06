@@ -370,7 +370,7 @@ export const SURVEYS = {
 
 export async function saveSurvey(type, answers) {
   const def = SURVEYS[type];
-  if (!def || answers.length !== def.questions.length || answers.some(a => !(a >= 0 && a <= 92))) throw new Error('Ответьте на все вопросы');
+  if (!def || answers.length !== def.questions.length || answers.some(a => typeof a !== 'number' || !(a >= 0 && a <= 92))) throw new Error('Ответьте на все вопросы');
   const score = answers.reduce((a, b) => a + b, 0);
   const list = await store.getSetting('surveys', []);
   await store.setSetting('surveys', [...list, { type, date: stats.today(), answers, score, grade: def.grade(score) }]);
