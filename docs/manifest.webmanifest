@@ -1,6 +1,6 @@
 {
-  "name": "Дневник головной боли",
-  "short_name": "Дневник",
+  "name": "Leria — дневник головной боли",
+  "short_name": "Leria",
   "lang": "ru",
   "start_url": "./#diary",
   "scope": "./",

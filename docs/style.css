@@ -357,6 +357,7 @@ details.mod[open] .fval { color: var(--accent); }
 
 /* ---- report: the app's theme on screen, light only when printed or saved as PDF ---- */
 .report h1 { font-size: 22px; }
+.report h1 .brand { float: right; font-size: 13px; font-weight: 400; color: var(--muted); letter-spacing: .5px; margin-top: 8px; }
 .report .card { border: 1px solid var(--line); }
 .report table { font-size: 12.5px; }
 .report td.nw { white-space: nowrap; }

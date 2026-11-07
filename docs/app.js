@@ -166,7 +166,7 @@ function renderLock() {
   pinTyped = '';
   const draw = () => {
     $view.innerHTML = `<div class="lock">
-      <div class="attack-head" style="margin-top:50px"><b>Дневник</b><span>Введите код</span></div>
+      <div class="attack-head" style="margin-top:50px"><b>Leria</b><span>Введите код</span></div>
       <div class="pindots">${[0, 1, 2, 3].map(i => `<i class="${i < pinTyped.length ? 'on' : ''}"></i>`).join('')}</div>
       <div class="keypad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map(k => k ? `<button data-key="${k}" aria-label="${k === '⌫' ? 'Стереть' : k}">${k}</button>` : '<span></span>').join('')}</div>
       <button class="ghost" id="forgot" style="margin:18px auto 0;display:block">Забыли код?</button></div>`;
@@ -1346,7 +1346,7 @@ async function renderReport(from, to) {
       </div>
     </div>
     <div class="report">
-      <div class="rhead"><h1>Дневник головной боли</h1>
+      <div class="rhead"><h1>Дневник головной боли <span class="brand">Leria</span></h1>
       ${pr.birth_year || pr.diagnosis || pr.since || pr.doctor ? `<p>${[pr.birth_year && `Год рождения: ${esc(pr.birth_year)}`, pr.diagnosis && `Диагноз: ${esc(pr.diagnosis)}`, pr.since && `Головные боли с ${esc(pr.since)}`, pr.doctor && `Врач: ${esc(pr.doctor)}`].filter(Boolean).join(' · ')}</p>` : ''}
       <p>Период: ${fmtDateFull(from)} — ${fmtDateFull(to)} (${s.total_days} дн, заполнено ${s.logged_days})</p></div>
       <div class="card"><h2>Сводка</h2><table>
