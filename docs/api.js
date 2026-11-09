@@ -112,7 +112,7 @@ const newAttack = (time, intensity) => ({ start_time: time, end_time: null, inte
 
 async function todayAttack(date) {
   const day = await store.get('days', date);
-  if (!day?.attacks[0]) throw new Error('Сначала отметьте силу боли');
+  if (!day?.attacks.length) throw new Error('Сначала отметьте силу боли');
   return day;
 }
 
@@ -121,14 +121,15 @@ async function todayAttack(date) {
  * already ended starts again and is marked as returned (pain coming back the same day is the same attack).
  * Returns the record as it was before, so the sheet can undo the swipe.
  */
-export async function logPain(intensity) {
+export async function logPain(intensity, whenEnded = 'recur') {
   if (!(Number.isInteger(intensity) && intensity >= 1 && intensity <= 10)) throw new Error('Сила боли — от 1 до 10');
   const date = stats.today();
   const before = await store.get('days', date);
   const day = before ? structuredClone(before) : emptyDay(date);
-  const a = day.attacks[0];
+  const a = day.attacks.at(-1);
   let recurred = false;
   if (!a) day.attacks = [newAttack(hhmm(new Date()), intensity)];
+  else if (a.end_time && whenEnded === 'new') day.attacks.push(newAttack(hhmm(new Date()), intensity));
   else if (a.end_time) {
     Object.assign(a, { end_time: null, recurred: true, intensity: Math.max(a.intensity, intensity) });
     recurred = true;
@@ -145,7 +146,7 @@ export async function restoreDay(date, before) {
 /** Changes a few fields of the day's attack: where and how it hurts, symptoms, times, disability. */
 export async function patchAttack(date, patch) {
   const day = await todayAttack(date);
-  const a = day.attacks[0];
+  const a = day.attacks.at(-1);
   const lists = { location: LOC_RU, character: CHAR_RU, symptoms: SYM_RU };
   for (const [k, v] of Object.entries(patch)) {
     if (lists[k]) {
@@ -167,14 +168,14 @@ export async function patchAttack(date, patch) {
 export async function addDose(date, medId) {
   const day = await todayAttack(date);
   const time = hhmm(new Date());
-  day.attacks[0].doses.push({ med_id: medId, time, effect: null });
+  day.attacks.at(-1).doses.push({ med_id: medId, time, effect: null });
   await saveDay(date, { ...day, headache: true });
   return time;
 }
 
 export async function removeDose(date, medId, time) {
   const day = await todayAttack(date);
-  const doses = day.attacks[0].doses;
+  const doses = day.attacks.at(-1).doses;
   const i = doses.findIndex(x => x.med_id === medId && x.time === time);
   if (i >= 0) doses.splice(i, 1);
   await saveDay(date, { ...day, headache: true });
@@ -298,10 +299,11 @@ export async function deleteMed(id) {
 
 export async function settings() {
   const keys = { city: null, reminder_time: '21:00', modules: DEFAULT_MODULES, last_backup: null, profile: {},
-    track_cycle: true, cycle_len: null, pin: null };
+    track_cycle: true, cycle_len: null, pin: null, faceid: null };
   const vals = await Promise.all(Object.entries(keys).map(([k, d]) => store.getSetting(k, d)));
   const out = Object.fromEntries(Object.keys(keys).map((k, i) => [k, vals[i]]));
   out.has_pin = !!out.pin;
+  out.faceid = !!out.faceid;
   delete out.pin;
   return out;
 }
@@ -327,10 +329,13 @@ async function digest(text) {
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 export async function setPin(pin) {
-  if (pin == null) return store.setSetting('pin', null);
+  if (pin == null) { await store.setSetting('faceid', null); return store.setSetting('pin', null); }
   if (!/^\d{4}$/.test(pin)) throw new Error('Код — 4 цифры');
   await store.setSetting('pin', await digest(pin));
 }
+/** Face ID / Touch ID: the id of a passkey made on this phone; unlocking asks the phone to verify the face for it. */
+export const faceId = () => store.getSetting('faceid', null);
+export const setFaceId = id => store.setSetting('faceid', id);
 export async function hasPin() { return !!(await store.getSetting('pin', null)); }
 export async function checkPin(pin) { return (await store.getSetting('pin', null)) === await digest(pin); }
 
@@ -570,10 +575,11 @@ export async function aiPrompt(from, to) {
         a.recurred && 'вернулась в течение суток',
       ].filter(Boolean).join(', '));
     }
-    const doses = stats.allDoses(d).map(x => {
+    // Each dose is timed from the start of its own attack (a day can have several).
+    const doses = [...d.attacks.flatMap(a => a.doses.map(x => [x, a])), ...d.doses.map(x => [x, null])].map(([x, a]) => {
       const m = medsById.get(x.med_id);
-      const delay = minutesBetween(d.attacks[0]?.start_time, x.time);
-      return `${m ? `${m.name} ${m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null && d.attacks.length ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}`;
+      const delay = a ? minutesBetween(a.start_time, x.time) : null;
+      return `${m ? `${m.name} ${m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}`;
     });
     if (doses.length) parts.push('лекарства: ' + doses.join('; '));
     const f = Object.entries(d.factors)
@@ -646,4 +652,47 @@ ${monthsText}
 ${medsText ? `\nЭффективность лекарств (оценка через 2 часа после приёма):\n${medsText}\n` : ''}${prevText ? `\nПрофилактическое лечение:\n${prevText}\n` : ''}
 Дневник по дням (дата | боль: время, длительность, сила, где и какая, симптомы | лекарства | факторы | цикл | сон | давление | заметка):
 ${lines.join('\n') || '(записей за период нет)'}`;
+}
+
+// ---------- import from other apps and tables ----------
+
+/**
+ * Adds records from another source. Medicines are matched by name (new ones are created with a guessed type);
+ * an existing day keeps everything it has and only gains attacks with a start time it doesn't have yet,
+ * so importing the same file twice adds nothing.
+ */
+export async function importDays(records, kindOf) {
+  const medList = await store.getAll('meds');
+  const byName = new Map(medList.filter(m => !m.deleted).map(m => [m.name.toLowerCase(), m.id]));
+  const medId = async (name, dose) => {
+    const key = name.trim().toLowerCase();
+    if (!byName.has(key)) byName.set(key, await store.put('meds', checkMed({ name: name.trim(), dose, kind: kindOf(name), active: true })));
+    return byName.get(key);
+  };
+  let days = 0, attacks = 0;
+  for (const r of records) {
+    if (!r.date || r.date > stats.today()) continue;
+    const old = await store.get('days', r.date);
+    const day = old ? structuredClone(old) : emptyDay(r.date);
+    const known = new Set(day.attacks.map(a => a.start_time || ''));
+    let added = 0;
+    for (const a of r.attacks) {
+      if (known.has(a.start_time || '') && (old?.attacks.length)) continue;
+      const doses = [];
+      for (const x of a.doses) doses.push({ med_id: await medId(x.name, x.dose), time: x.time || null, effect: x.effect || null });
+      day.attacks.push({ start_time: a.start_time || null, end_time: a.end_time || null, intensity: a.intensity,
+        location: a.location, character: a.character, symptoms: a.symptoms, note: a.note || '', doses, disability: null, recurred: false });
+      added++;
+    }
+    if (!old && !r.headache && !r.attacks.length) { /* a pain-free day */ }
+    else if (!added && old) { if (r.period && !day.period) day.period = true; else continue; }
+    day.headache = day.headache || r.headache || added > 0;
+    day.period = day.period || !!r.period;
+    if (day.sleep_hours == null && r.sleep_hours != null) day.sleep_hours = r.sleep_hours;
+    if (r.note && !day.note.includes(r.note)) day.note = [day.note, r.note].filter(Boolean).join('; ');
+    day.attacks.sort((x, y) => (x.start_time || '99').localeCompare(y.start_time || '99'));
+    await saveDay(r.date, day);
+    days++; attacks += added;
+  }
+  return { days, attacks, meds: byName.size - medList.filter(m => !m.deleted).length };
 }

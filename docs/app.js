@@ -1,6 +1,8 @@
 import * as api from './api.js';
+import * as imp from './import.js';
 
 const BACKUP_EVERY_MS = 7 * 24 * 3600 * 1000;
+const backupDue = set => !set.last_backup || Date.now() - set.last_backup > BACKUP_EVERY_MS;
 
 // ---------- dictionaries (factors and modules come from /api/config) ----------
 
@@ -57,7 +59,7 @@ function toast(msg) {
 function ask(text, { ok = 'Да', cancel = 'Отмена', danger = false, input = null } = {}) {
   return new Promise(resolve => {
     const box = document.createElement('div');
-    box.className = 'dialog';
+    box.className = 'overlay';
     box.innerHTML = `<div class="dlg-back"></div>
       <div class="dlg" role="alertdialog" aria-modal="true">
         <p>${esc(text)}</p>
@@ -73,6 +75,19 @@ function ask(text, { ok = 'Да', cancel = 'Отмена', danger = false, input
     box.querySelectorAll('[data-a]').forEach(b => b.onclick = () => done(b.dataset.a === '1'));
     (field || box.querySelector('[data-a="1"]')).focus();
   });
+}
+
+// A read-only explanation in the app's own dialog, with one "Понятно" button.
+function showInfo(title, html) {
+  const box = document.createElement('div');
+    box.className = 'overlay';
+  box.innerHTML = `<div class="dlg-back"></div><div class="dlg info" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <h2>${esc(title)}</h2><div class="dlg-body">${html}</div><button class="primary wide" data-ok>Понятно</button></div>`;
+  document.body.append(box);
+  const close = () => box.remove();
+  box.querySelector('.dlg-back').onclick = close;
+  box.querySelector('[data-ok]').onclick = close;
+  box.querySelector('[data-ok]').focus();
 }
 
 // Clipboard API first; the old select-and-copy way when the browser refuses it.
@@ -125,6 +140,8 @@ async function route() {
   if (name === 'today' || name === 'day') name = 'diary';
   wz = null;
   if (qs) closeQuick(false);
+  // Dialogs belong to the screen they were opened on.
+  document.querySelectorAll('body > .overlay').forEach(x => x.remove());
   document.body.classList.toggle('wizard', name === 'log');
   document.body.classList.toggle('home', TAB_OF[name] === 'diary');
   applyDim(0);
@@ -161,14 +178,51 @@ document.addEventListener('visibilitychange', () => {
   else if (unlocked && Date.now() - hiddenAt > 5 * 60 * 1000) { unlocked = false; route(); }
 });
 
-function renderLock() {
+// ---------- Face ID ----------
+// A passkey kept on this phone: the phone itself checks the face (or fingerprint) and only then answers.
+// Like the code, it hides the diary from someone holding the phone; it does not encrypt anything.
+const FACE_SVG = '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9v1.5M15 9v1.5M12 9v4h-1M9.5 15.5c1.4 1.2 3.6 1.2 5 0"/></svg>';
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const faceIdAvailable = async () => {
+  try { return !!window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); } catch { return false; }
+};
+async function faceIdEnroll() {
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    rp: { name: 'Leria' },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'Leria', displayName: 'Дневник Leria' },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
+    timeout: 60000,
+  } });
+  await api.setFaceId(b64(cred.rawId));
+}
+async function faceIdVerify() {
+  const id = await api.faceId();
+  if (!id) return false;
+  await navigator.credentials.get({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    allowCredentials: [{ type: 'public-key', id: unb64(id) }],
+    userVerification: 'required',
+    timeout: 60000,
+  } });
+  return true;
+}
+
+async function renderLock() {
   document.body.classList.add('locked');
   pinTyped = '';
+  const face = !!(await api.faceId());
+  const tryFace = async () => {
+    try { if (await faceIdVerify()) { unlocked = true; route(); } } catch { /* cancelled: the keypad stays */ }
+  };
   const draw = () => {
     $view.innerHTML = `<div class="lock">
-      <div class="attack-head" style="margin-top:50px"><b>Leria</b><span>Введите код</span></div>
+      <div class="attack-head" style="margin-top:50px"><b>Leria</b><span>${face ? 'Face ID или код' : 'Введите код'}</span></div>
       <div class="pindots">${[0, 1, 2, 3].map(i => `<i class="${i < pinTyped.length ? 'on' : ''}"></i>`).join('')}</div>
-      <div class="keypad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map(k => k ? `<button data-key="${k}" aria-label="${k === '⌫' ? 'Стереть' : k}">${k}</button>` : '<span></span>').join('')}</div>
+      <div class="keypad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map(k => k ? `<button data-key="${k}" aria-label="${k === '⌫' ? 'Стереть' : k}">${k}</button>`
+        : face ? `<button class="facebtn" data-face aria-label="Войти с Face ID">${FACE_SVG}</button>` : '<span></span>').join('')}</div>
       <button class="ghost" id="forgot" style="margin:18px auto 0;display:block">Забыли код?</button></div>`;
     $view.querySelectorAll('[data-key]').forEach(b => b.onclick = async () => {
       const k = b.dataset.key;
@@ -179,6 +233,7 @@ function renderLock() {
         else { toast('Неверный код'); pinTyped = ''; draw(); }
       }
     });
+    $view.querySelector('[data-face]')?.addEventListener('click', tryFace);
     document.getElementById('forgot').onclick = async () => {
       if (!await ask('Код можно сбросить только вместе со всеми данными на этом телефоне. Если есть резервная копия, её можно будет восстановить. Сбросить?', { ok: 'Сбросить', danger: true })) return;
       await api.deleteAll();
@@ -188,6 +243,8 @@ function renderLock() {
     };
   };
   draw();
+  // Ask for the face straight away; if the phone wants a tap first, the button under the keypad does it.
+  if (face) tryFace();
 }
 window.addEventListener('hashchange', route);
 
@@ -243,8 +300,8 @@ async function renderDiary(d) {
   const [day, s, set, pending, h] = await Promise.all([
     api.day(d), api.summary(start, end), api.settings(), api.pendingEffects(), isToday ? api.home() : null,
   ]);
-  const backupDue = s.logged_days > 0 && (!set.last_backup || Date.now() - set.last_backup > BACKUP_EVERY_MS);
-  if (backupDue) await prepareBackup();
+  // A due backup is only a small dot on the Settings tab; the reminder itself lives in Settings.
+  document.querySelector('.tabs [data-tab="settings"]').classList.toggle('due', s.logged_days > 0 && backupDue(set));
   const cell = p => {
     const dt = parseISO(p.date), inner = `<span class="dn">${DOW[(dt.getDay() + 6) % 7]}</span>${dayMark(p, { selected: p.date === d })}`;
     return p.date > today() ? `<span class="wd">${inner}</span>`
@@ -257,25 +314,24 @@ async function renderDiary(d) {
   const title = isToday ? 'Сегодня' : d === addDays(today(), -1) ? 'Вчера' : fmtDate(d);
 
   $view.innerHTML = `
-    <h1 style="margin-bottom:0">${title}</h1>
-    <p class="datesub">${WEEKDAYS[dt.getDay()]}${title === fmtDate(d) ? '' : ', ' + fmtDate(d)}</p>
+    <div class="dayhead">
+      <div><div class="dh-date">${WEEKDAYS[dt.getDay()]}${title === fmtDate(d) ? '' : ', ' + fmtDate(d)}</div><h1>${title}</h1></div>
+      <div class="dh-actions">${isToday ? '' : '<a class="dh-today" href="#diary">Сегодня</a>'}
+        <a class="dh-cal" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg></a></div>
+    </div>
     ${showInstallHint() ? `<div class="banner warn hint"><button class="ghost" data-hide-hint aria-label="Скрыть подсказку">✕</button>
       <b>Добавьте дневник на экран «Домой»</b>
       <p style="font-size:14px">«Поделиться» → «На экран „Домой“». Дальше открывайте иконку: записи из вкладки Safari в ней не появятся.</p></div>` : ''}
-    <div class="weekstrip"><div class="weeks" aria-label="Дни, листаются влево и вправо">${strip}</div><a class="calbtn" href="#calendar/${d.slice(0, 7)}" aria-label="Календарь">▦</a></div>
+    <div class="weekstrip"><div class="weeks" aria-label="Дни, листаются влево и вправо">${strip}</div></div>
     ${pending.map(x => `<div class="card effcard"><div>Помог ли ${esc(x.name)}, принятый ${x.date === today() ? '' : 'вчера '}в ${x.time}?</div>
       <div class="effbtns">${Object.entries(L.effects).map(([k, v]) => `<button data-eff="${k}" data-date="${x.date}" data-ai="${x.ai}" data-di="${x.di}">${v}</button>`).join('')}</div></div>`).join('')}
     ${statusCard(day, h)}
     ${!day.day ? '' : isToday ? `<details class="daymore"><summary>Подробности дня</summary>${dayCard(day)}</details>` : dayCard(day)}
-    ${isToday ? riskCard(h.risk) + medsMeter(h.overuse) + monthTiles(h) + missedCard(h.missed) : ''}
-    ${backupDue ? `<div class="banner ok"><b>Пора сделать резервную копию</b>
-      <p style="font-size:14px">Записи хранятся только в этом телефоне. Сохраните копию в «Файлы» или iCloud Drive — раз в неделю достаточно.</p>
-      <button class="primary" data-backup style="margin-top:6px">Сохранить копию</button></div>` : ''}`;
+    ${isToday ? riskCard(h.risk) + medsMeter(h.overuse) + monthTiles(h) + missedCard(h.missed) : ''}`;
 
   const weeksEl = $view.querySelector('.weeks'), cur = weeksEl.querySelector(`[data-wk="${monday(d)}"]`);
   weeksEl.scrollLeft = cur.offsetLeft - weeksEl.offsetLeft;
   const again = () => renderDiary(d).catch(err => toast(err.message));
-  $view.querySelector('[data-backup]')?.addEventListener('click', () => saveBackup().catch(err => toast(err.message)));
   $view.querySelectorAll('[data-eff]').forEach(b => b.onclick = async () => {
     await api.setEffect(b.dataset.date, Number(b.dataset.ai), Number(b.dataset.di), b.dataset.eff);
     toast('Отмечено');
@@ -286,6 +342,7 @@ async function renderDiary(d) {
     try { await api.markNoPain(d); toast('Отмечено: без боли'); again(); } catch (err) { toast(err.message); }
   });
   $view.querySelectorAll('[data-quick]').forEach(b => b.onclick = () => openQuick().catch(err => toast(err.message)));
+  $view.querySelector('[data-risk-how]')?.addEventListener('click', () => showRiskHow(h.risk));
   $view.querySelector('[data-pain-over]')?.addEventListener('click', async () => {
     const t = nowTime();
     await api.patchAttack(d, { end_time: t });
@@ -296,7 +353,7 @@ async function renderDiary(d) {
 
 // The big card at the top: how the day is going, with the one or two actions that make sense right now.
 function statusCard(data, h) {
-  const d = data.date, day = data.day, a = data.attacks[0], isToday = d === today();
+  const d = data.date, day = data.day, a = data.attacks.at(-1), isToday = d === today();
   if (!isToday) {
     if (day) return '';
     return `<div class="status">
@@ -323,6 +380,7 @@ function statusCard(data, h) {
   // Only what was taken for the pain: a daily preventive pill is not news here.
   const doses = [...data.attacks.flatMap(x => x.doses), ...data.doses].filter(x => medById(x.med_id)?.kind !== 'preventive');
   const sub = [
+    data.attacks.length > 1 && `${data.attacks.length}-й приступ за день`,
     a.start_time && (ongoing ? `с ${a.start_time}` : `${a.start_time}–${a.end_time}`),
     a.migraine && 'похоже на мигрень',
     a.recurred && 'возвращалась',
@@ -334,7 +392,7 @@ function statusCard(data, h) {
       ${sub ? `<div class="st-sub">${sub}</div>` : ''}
       ${nudge}
       <div class="st-btns">${ongoing ? '<button class="primary" data-pain-over>Боль прошла</button><button data-quick>Дополнить</button>'
-        : '<button data-quick>Дополнить</button><button data-quick>Вернулась</button>'}</div></div>`;
+        : '<button data-quick>Дополнить</button><button data-quick>Снова болит</button>'}</div></div>`;
 }
 
 // Painkiller days against the medication-overuse limit, always visible: the number neurologists ask about first.
@@ -374,6 +432,27 @@ function missedCard(missed) {
     <span>Не заполнено: ${shown}${missed.length > 3 ? ` и ещё ${missed.length - 3}` : ''}</span><span aria-hidden="true">→</span></a>`;
 }
 
+// Where the forecast comes from, in plain words: the rules, the data each one reads, and the personal model.
+function showRiskHow(r) {
+  const on = new Set(r.reasons.map(x => x.key));
+  const rule = (key, text, src) => `<li class="${on.has(key) ? 'hit' : ''}"><b>${text}</b><span>${src}</span></li>`;
+  const m = r.model;
+  showInfo('Откуда прогноз на завтра', `
+    <p>Прогноз считается только в телефоне, по вашим записям и погоде. Проверяются признаки, которые в исследованиях чаще всего предшествуют приступу:</p>
+    <ul class="risklist">
+      ${rule('period', 'Менструация завтра или в ближайшие дни', 'прогноз цикла по отмеченным дням')}
+      ${rule('pressure', 'Перепад давления на 5 гПа и больше', 'прогноз погоды Open-Meteo для вашего города')}
+      ${rule('sleep', 'Мало сна или плохой сон', 'сон меньше 6 часов или «плохое качество сна»')}
+      ${rule('prodrome', 'Ранние сигналы', 'два и больше: зевота, усталость, шея, тяга к сладкому…')}
+      ${rule('alcohol', 'Алкоголь', 'отмечен сегодня')}
+      ${rule('stress', 'Сильный стресс', 'отмечен «заметно» или «сильно»')}
+      ${rule('pain', 'Сегодня уже болела голова', 'приступы часто идут сериями')}
+    </ul>
+    <p class="muted">Выделено то, что есть сегодня. Одна причина — «немного выше обычного», две и больше — «повышенный».</p>
+    <p><b>Личная модель.</b> Когда наберётся 60 пар заполненных дней подряд, дневник сам учится, какие из этих признаков важны именно для вас, и проверяет себя на последних днях. Если угадывает лучше случайности, прогноз даёт она, иначе остаются правила. ${m.ready ? `Сейчас прогноз даёт она: проверка на ваших днях — AUC ${m.auc}.` : m.auc != null ? `Она уже обучена на ${m.have} парах дней, но пока угадывает не лучше случайности (AUC ${m.auc}), поэтому работают правила.` : `Сейчас ${m.have} из ${m.need} пар.`}</p>
+    <p class="muted">Это подсказка, а не диагноз: приступ может прийти и без причин, и не прийти при всех.</p>`);
+}
+
 const RISK_LABEL = { low: 'обычный', medium: 'немного выше обычного', high: 'повышенный' };
 
 function riskCard(r) {
@@ -387,7 +466,8 @@ function riskCard(r) {
     ${r.level !== 'low' ? `<p class="tip">${r.reasons.slice(0, 2).map(x => x.tip).join(' ')}</p>` : ''}
     <p class="model">${m.ready ? `Личная модель: вероятность ${m.prob}%, обычно ${m.base}%. Проверена на ваших последних днях (AUC ${m.auc}).`
       : m.auc != null ? `Личная модель пока предсказывает не лучше случайности (AUC ${m.auc}) — прогноз по общим правилам.`
-      : `Прогноз по общим правилам. Личная модель появится, когда наберётся ${m.need} пар заполненных дней подряд (сейчас ${m.have}).`}</p></div>`;
+      : `Прогноз по общим правилам. Личная модель появится, когда наберётся ${m.need} пар заполненных дней подряд (сейчас ${m.have}).`}</p>
+    <button class="ghost riskhow" data-risk-how>Откуда этот прогноз →</button></div>`;
 }
 
 // The hint matters only in Safari on iPhone/iPad, where the browser tab and the Home Screen app keep separate data.
@@ -397,17 +477,22 @@ const dayType = data => !data.day.headache ? 'none' : data.attacks.some(x => x.m
 const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; };
 
 function dayCard(data) {
-  const day = data.day, a = data.attacks[0], type = dayType(data);
+  const day = data.day, type = dayType(data), many = data.attacks.length > 1;
   const exposed = Object.entries(day.factors).map(([k, v]) => [factorDef(k), v]).filter(([f, v]) => f.type && isExposed(f, v));
   const allDoses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
   const w = data.weather;
   const rows = [];
-  if (a) {
-    rows.push(['Время', a.start_time ? `${a.start_time}${a.end_time ? ' – ' + a.end_time : ' – ещё болит'}` : '—']);
-    rows.push(['Сила', `${a.intensity} из 10 · ${INTENSITY_WORDS[a.intensity]}`]);
-    if (a.location.length || a.character.length) rows.push(['Боль', esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character)].filter(Boolean).join('; '))]);
-    if (a.symptoms.length) rows.push(['Симптомы', esc(labelsOf(L.symptoms, a.symptoms))]);
-  }
+  data.attacks.forEach((a, i) => {
+    const time = a.start_time ? `${a.start_time}${a.end_time ? ' – ' + a.end_time : ' – ещё болит'}` : '—';
+    if (many) rows.push([`Приступ ${i + 1}`, `<b>${time}</b> · сила ${a.intensity}${a.migraine ? ' · похоже на мигрень' : ''}`]);
+    else {
+      rows.push(['Время', time]);
+      rows.push(['Сила', `${a.intensity} из 10 · ${INTENSITY_WORDS[a.intensity]}`]);
+    }
+    if (a.location.length || a.character.length) rows.push([many ? '' : 'Боль', esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character)].filter(Boolean).join('; '))]);
+    if (a.symptoms.length) rows.push([many ? '' : 'Симптомы', esc(labelsOf(L.symptoms, a.symptoms))]);
+    if (a.recurred) rows.push([many ? '' : 'Повтор', 'боль возвращалась']);
+  });
   if (allDoses.length) rows.push(['Лекарства', allDoses.map(doseText).join('<br>')]);
   if (day.sleep_hours != null) rows.push(['Сон', `${fmtHours(day.sleep_hours)}${day.sleep_start && day.sleep_end ? ` · ${day.sleep_start}–${day.sleep_end}` : ''}`]);
   if (day.period) rows.push(['Цикл', 'Менструация']);
@@ -432,6 +517,12 @@ async function startWizard(d, headache) {
   const day = data.day;
   const a = data.attacks[0];
   const toDose = x => ({ med_id: x.med_id, time: x.time || '', effect: x.effect });
+  const toAttack = x => ({
+    start_time: x.start_time || '', end_time: x.end_time || '', intensity: x.intensity,
+    location: [...x.location], character: [...x.character], symptoms: [...x.symptoms], note: x.note || '', doses: x.doses.map(toDose),
+    disability: x.disability ?? null, recurred: !!x.recurred,
+  });
+  const blank = () => ({ start_time: d === today() ? nowTime() : '', end_time: '', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [], disability: null, recurred: false });
   const draft = {
     headache,
     factors: { ...(day?.factors || {}) },
@@ -440,22 +531,21 @@ async function startWizard(d, headache) {
     sleep_start: day?.sleep_start || '',
     sleep_end: day?.sleep_end || '',
     note: day?.note || '',
-    attack: a ? {
-      start_time: a.start_time || '', end_time: a.end_time || '', intensity: a.intensity,
-      location: a.location, character: a.character, symptoms: a.symptoms, note: a.note, doses: a.doses.map(toDose),
-      disability: a.disability ?? null, recurred: !!a.recurred,
-    } : { start_time: d === today() ? nowTime() : '', end_time: '', intensity: 5, location: [], character: [], symptoms: [], note: '', doses: [], disability: null, recurred: false },
+    // A day can hold several attacks (pain went away and came back as a new one, or two separate episodes).
+    attacks: data.attacks.length ? data.attacks.map(toAttack) : [blank()],
     doses: data.doses.map(toDose),
   };
+  // `attack` is the one being edited, so the steps can keep using paths like "attack.location".
+  Object.defineProperty(draft, 'attack', { get: () => draft.attacks[wz.ai] });
   // Old days and in-between edits may hold doses on the "other" side; keep them visible in this flow.
-  if (!headache && a) draft.doses = [...draft.doses, ...draft.attack.doses];
-  if (headache && !a) { draft.attack.doses = [...draft.attack.doses, ...draft.doses]; draft.doses = []; }
+  if (!headache && a) draft.doses = [...draft.doses, ...draft.attacks.flatMap(x => x.doses)];
+  if (headache && !a) { draft.attacks[0].doses = [...draft.doses]; draft.doses = []; }
 
   const modules = enabledModules().map(m => ({ kind: 'module', module: m }));
   const steps = headache
     ? [{ kind: 'attack' }, { kind: 'symptoms' }, { kind: 'meds' }, ...modules, { kind: 'notes' }]
     : [...modules, { kind: 'meds' }, { kind: 'notes' }];
-  wz = { date: d, steps, step: 0, draft, dirty: false, existed: !!day, healthSleep: day?.sleep_hours == null && data.health?.sleep_hours != null };
+  wz = { date: d, steps, step: 0, ai: 0, blank, visited: new Set([0]), draft, dirty: false, existed: !!day, healthSleep: day?.sleep_hours == null && data.health?.sleep_hours != null };
   drawWizard();
 }
 
@@ -494,6 +584,7 @@ function pickTime(title, value, fallback) {
     const [h0, m0] = (value || fallback || nowTime()).split(':').map(Number);
     const hd = drum(24, h0), md = drum(60, m0);
     const box = document.createElement('div');
+    box.className = 'overlay';
     box.innerHTML = `<div class="dlg-back"></div>
       <div class="tp" role="dialog" aria-modal="true" aria-label="${esc(title)}">
         <div class="tp-head"><button class="ghost" data-tp="cancel">Отмена</button><b>${esc(title)}</b><button class="ghost tp-ok" data-tp="ok">Готово</button></div>
@@ -578,11 +669,20 @@ function doseList(path, list) {
     ${active.length ? `<button class="wide" style="margin-top:10px" data-act="add-dose" data-path="${path}">+ Добавить приём</button>` : ''}`;
 }
 
+// "Приступ 1 · 09:30 | Приступ 2 · 18:00 | + Ещё приступ" above the attack, symptoms and medicines steps.
+function attackSwitch(canAdd) {
+  const list = wz.draft.attacks;
+  if (list.length < 2 && !canAdd) return '';
+  return `<div class="atkswitch">${list.map((x, i) => `<button class="pill ${i === wz.ai ? 'on' : ''}" data-act="atk" data-i="${i}">Приступ ${i + 1}${x.start_time ? ' · ' + x.start_time : ''}</button>`).join('')}
+    ${canAdd ? '<button class="pill add" data-act="atk-add">+ Ещё приступ</button>' : ''}</div>`;
+}
+
 function stepBody(st) {
   const dr = wz.draft, a = dr.attack, when = dayWord(wz.date);
   switch (st.kind) {
     case 'attack': return `
       <h1>Приступ</h1><p class="wiz-sub">${fmtDateFull(wz.date)}</p>
+      ${attackSwitch(true)}
       <div class="card">
         <div class="row" style="flex-wrap:nowrap">
           <div class="field" style="flex:1">${timeField('attack.start_time', a.start_time, 'Началась')}</div>
@@ -598,9 +698,11 @@ function stepBody(st) {
       </div>
       <h3>Где болит</h3>${pills('attack.location', L.location, a.location)}
       <h3>Какая боль</h3>${pills('attack.character', L.character, a.character)}
-      <h3>Насколько мешала</h3><div class="pills">${L.disability.map((t, i) => `<button class="pill ${a.disability === i ? 'on' : ''}" data-act="dis" data-val="${i}">${t}</button>`).join('')}</div>`;
+      <h3>Насколько мешала</h3><div class="pills">${L.disability.map((t, i) => `<button class="pill ${a.disability === i ? 'on' : ''}" data-act="dis" data-val="${i}">${t}</button>`).join('')}</div>
+      ${dr.attacks.length > 1 ? `<button class="ghost danger wide" style="margin-top:16px" data-act="atk-del">Удалить приступ ${wz.ai + 1}</button>` : ''}`;
     case 'symptoms': return `
       <h1>Симптомы</h1><p class="wiz-sub">Что ещё было во время приступа</p>
+      ${attackSwitch(false)}
       <div class="list">${Object.entries(L.symptoms).map(([k, [label, icon]]) => `
         <div class="frow"><span class="fic pink">${icon}</span><div class="fbody"><div class="flabel">${label}</div></div>
           <button class="switch ${a.symptoms.includes(k) ? 'on' : ''}" data-act="toggle" data-path="attack.symptoms" data-val="${k}" role="switch" aria-label="${esc(label)}"></button></div>`).join('')}
@@ -608,7 +710,7 @@ function stepBody(st) {
       <div class="list" style="margin-top:12px"><div class="frow"><span class="fic">↻</span><div class="fbody"><div class="flabel">Боль вернулась в течение суток</div><div class="fval">после того как прошла</div></div>
         <button class="switch ${a.recurred ? 'on' : ''}" data-act="recur" role="switch" aria-label="Боль вернулась в течение суток"></button></div></div>`;
     case 'meds': return dr.headache
-      ? `<h1>Лекарства</h1><p class="wiz-sub">Что принимали от этого приступа и помогло ли</p>${doseList('attack.doses', a.doses)}`
+      ? `<h1>Лекарства</h1><p class="wiz-sub">Что принимали от этого приступа и помогло ли</p>${attackSwitch(false)}${doseList('attack.doses', a.doses)}`
       : `<h1>Лекарства</h1><p class="wiz-sub">Если принимали что-то ${when} — например, профилактику</p>${doseList('doses', dr.doses)}`;
     case 'module': {
       const m = st.module;
@@ -640,6 +742,7 @@ function drawWizard() {
       <button class="x" data-act="close" aria-label="Закрыть">✕</button>
       <div class="progress" role="progressbar" aria-valuenow="${wz.step + 1}" aria-valuemax="${wz.steps.length}"><i style="width:${(wz.step + 1) / wz.steps.length * 100}%"></i></div>
       <span class="muted">${wz.step + 1}/${wz.steps.length}</span>
+      ${last ? '' : '<button class="ghost wz-finish" data-act="finish">Завершить</button>'}
     </div>
     ${stepBody(st)}
     <div class="wiz-bar"><div>
@@ -656,11 +759,13 @@ function redraw() {
 
 function wizardPayload() {
   const dr = wz.draft;
-  // Every factor of a shown module counts as answered (unchanged = "нет" / 0), like a paper diary row.
+  // Every factor of a module she actually went through counts as answered (unchanged = "нет" / 0), like a paper
+  // diary row. Modules skipped with «Завершить» stay unanswered, so they don't count as "no" in the analysis.
   const factors = { ...dr.factors };
-  for (const m of enabledModules()) for (const f of m.factors) if (factors[f.key] == null) factors[f.key] = f.type === 'bool' ? false : 0;
+  const seen = wz.steps.filter((st, i) => st.kind === 'module' && wz.visited.has(i)).map(st => st.module);
+  for (const m of seen) for (const f of m.factors) if (factors[f.key] == null) factors[f.key] = f.type === 'bool' ? false : 0;
   const clean = list => list.filter(x => x.med_id).map(x => ({ med_id: x.med_id, time: x.time || null, effect: x.effect || null }));
-  const a = dr.attack;
+  const byStart = (x, y) => (x.start_time || '99').localeCompare(y.start_time || '99');
   return {
     headache: dr.headache,
     factors,
@@ -669,7 +774,7 @@ function wizardPayload() {
     sleep_start: dr.sleep_start || null,
     sleep_end: dr.sleep_end || null,
     note: dr.note,
-    attacks: dr.headache ? [{ ...a, start_time: a.start_time || null, end_time: a.end_time || null, doses: clean(a.doses) }] : [],
+    attacks: dr.headache ? [...dr.attacks].sort(byStart).map(a => ({ ...a, start_time: a.start_time || null, end_time: a.end_time || null, doses: clean(a.doses) })) : [],
     doses: clean(dr.doses),
   };
 }
@@ -684,15 +789,30 @@ async function wizardAction(el) {
       location.hash = `#diary/${wz.date}`;
       return;
     case 'back':
-      wz.step--; drawWizard(); window.scrollTo(0, 0); return;
+      wz.step--; wz.visited.add(wz.step); drawWizard(); window.scrollTo(0, 0); return;
     case 'next':
-      if (wz.step < wz.steps.length - 1) { wz.step++; drawWizard(); window.scrollTo(0, 0); return; }
+      if (wz.step < wz.steps.length - 1) { wz.step++; wz.visited.add(wz.step); drawWizard(); window.scrollTo(0, 0); return; }
       el.disabled = true;
       await api.saveDay(wz.date, wizardPayload());
       wz.dirty = false;
       toast('Записано ✓');
       location.hash = `#diary/${wz.date}`;
       return;
+    case 'finish':
+      // «Завершить»: keep what is filled in so far and leave; the rest can be added later.
+      el.disabled = true;
+      await api.saveDay(wz.date, wizardPayload());
+      wz.dirty = false;
+      toast('Сохранено. Остальное можно дописать позже');
+      location.hash = `#diary/${wz.date}`;
+      return;
+    case 'atk': wz.ai = Number(el.dataset.i); redraw(); return;
+    case 'atk-add': dr.attacks.push(wz.blank()); wz.ai = dr.attacks.length - 1; break;
+    case 'atk-del':
+      if (!await ask(`Удалить приступ ${wz.ai + 1}? Его время, симптомы и лекарства пропадут.`, { ok: 'Удалить', danger: true })) return;
+      dr.attacks.splice(wz.ai, 1);
+      wz.ai = Math.max(0, wz.ai - 1);
+      break;
     case 'delete':
       if (!await ask(`Удалить всю запись за ${fmtDate(wz.date)}?`, { ok: 'Удалить', danger: true })) return;
       await api.deleteDay(wz.date);
@@ -795,7 +915,7 @@ async function renderCalendar(ym) {
   const n = data.headache_days;
   $view.innerHTML = `<div class="calarea">
     <div class="monthbar"><h1>${MONTHS[m - 1]}${y !== new Date().getFullYear() ? ' ' + y : ''}</h1>
-      <div class="nav"><button data-go="${prev}" aria-label="Предыдущий месяц">‹</button><button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div></div>
+      <div class="nav"><button data-cal-info aria-label="Как читать календарь" class="infobtn">i</button><button data-go="${prev}" aria-label="Предыдущий месяц">‹</button><button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div></div>
     <p class="sumline"><b>${n}</b> ${plural(n, 'день', 'дня', 'дней')} боли · <b>${data.migraine_days}</b> похоже на мигрень · ${overuseText(data.overuse)}</p>
     <div class="seg" style="margin-bottom:16px">
       <button data-view="month" class="${pr.view === 'month' ? 'on' : ''}">Месяц</button>
@@ -804,6 +924,14 @@ async function renderCalendar(ym) {
     ${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}</div>`;
 
   $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
+  $view.querySelector('[data-cal-info]').onclick = () => showInfo('Как читать календарь', `<div class="legend vert">
+    <span><i style="background:var(--ha)"></i>головная боль</span>
+    <span><i style="background:var(--mi)"></i>похоже на мигрень</span>
+    <span><i style="background:var(--med)"></i>принимала обезболивающее</span>
+    ${CFG.trackCycle ? '<span><i style="background:var(--per)"></i>линия под днём — менструация, бледная — прогноз</span>' : ''}
+    <span><b class="lg-size"><i class="s1"></i><i class="s2"></i></b>чем больше круг, тем сильнее боль</span>
+    <span><b class="lg-size">?</b>день не заполнен</span></div>
+    <p class="muted">Листайте месяцы свайпом влево и вправо. Нажмите на день, чтобы увидеть подробности.</p>`);
   // Swipe left or right on the month to change it: a finger on the phone, two fingers on a Mac trackpad.
   const area = $view.querySelector('.calarea');
   const flip = dir => {
@@ -864,8 +992,6 @@ function monthGrid(data, cyc, pr, ym) {
   const next = cyc.forecast[0];
   return `
     <div class="cal">${DOW.map(d => `<div class="dow">${d.toLowerCase()}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>
-    <div class="legend"><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span>
-      <span>чем больше круг, тем сильнее боль</span><span>? — день не заполнен</span></div>
     <div class="toggles">
       <button data-cal-toggle="cal_meds" class="${pr.meds ? 'on' : ''}" aria-pressed="${pr.meds}"><i style="background:var(--med)"></i>Лекарства</button>
       ${CFG.trackCycle ? `<button data-cal-toggle="cal_cycle" class="${pr.cycle ? 'on' : ''}" aria-pressed="${pr.cycle}"><i style="background:var(--per)"></i>Цикл</button>` : ''}
@@ -884,11 +1010,12 @@ async function showPeek(date, cyc) {
       <p>Нет записи${cd ? ` · ${cd}-й день цикла` : ''}</p></div>`;
     return;
   }
-  const type = dayType(data), a = data.attacks[0];
-  const doses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
+  const type = dayType(data), at = data.attacks;
+  const doses = [...at.flatMap(x => x.doses), ...data.doses];
   const parts = [
-    a && `сила ${a.intensity}`,
-    a?.start_time && `${a.start_time}${a.end_time ? '–' + a.end_time : ''}`,
+    at.length > 1 && `${at.length} ${plural(at.length, 'приступ', 'приступа', 'приступов')}`,
+    at.length && `сила ${Math.max(...at.map(x => x.intensity))}`,
+    ...at.filter(x => x.start_time).map(x => `${x.start_time}${x.end_time ? '–' + x.end_time : ''}`),
     doses.length && doses.map(doseText).join(', '),
     data.day.period ? 'менструация' : cd && `${cd}-й день цикла`,
     data.day.sleep_hours != null && `сон ${data.day.sleep_hours} ч`,
@@ -941,8 +1068,13 @@ const $sheet = document.getElementById('sheet');
 async function openQuick() {
   if (!CFG) await loadBase();
   const ctx = await api.quickContext();
-  const a = ctx.today?.attacks[0];
+  const a = ctx.today?.attacks.at(-1);
   qs = { ctx, mode: !a ? 'new' : a.end_time ? 'ended' : 'open', value: a && !a.end_time ? a.intensity : null, added: new Map(), undo: undefined };
+  // Pain back within 3 hours of easing is most likely the same attack returning; later — a new one. She can switch.
+  if (qs.mode === 'ended') {
+    const mins = t => +t.slice(0, 2) * 60 + +t.slice(3);
+    qs.endChoice = mins(nowTime()) - mins(a.end_time) <= 180 ? 'recur' : 'new';
+  }
   document.body.classList.add('sheet-open');
   applyDim(Number(pref.get('attack_dim', 0.2)));
   drawQuick();
@@ -966,10 +1098,10 @@ const minusMinutes = mins => {
 const chip = (on, attrs, text) => `<button class="pill ${on ? 'on' : ''}" ${attrs} aria-pressed="${on}">${text}</button>`;
 
 function drawQuick() {
-  const { ctx } = qs, a = ctx.today?.attacks[0], v = qs.value;
-  const head = qs.mode === 'new' ? 'Насколько болит?' : qs.mode === 'ended' ? 'Боль вернулась?' : 'Сила боли на пике';
+  const { ctx } = qs, a = ctx.today?.attacks.at(-1), v = qs.value;
+  const head = qs.mode === 'new' ? 'Насколько болит?' : qs.mode === 'ended' ? 'Снова болит?' : 'Сила боли на пике';
   const hint = qs.mode === 'new' ? 'Проведите пальцем до нужной силы и отпустите — запись сохранится'
-    : qs.mode === 'ended' ? `Приступ закончился в ${a.end_time}. Если снова болит — проведите по шкале. Ниже можно дополнить.`
+    : qs.mode === 'ended' ? `Приступ закончился в ${a.end_time}. Выберите, что это, и проведите по шкале. Ниже можно дополнить прошлый.`
     : 'Сохранено. Если сила другая — проведите ещё раз';
   let details = '';
   if (a) {
@@ -1005,6 +1137,9 @@ function drawQuick() {
   $sheet.innerHTML = `<div class="qs-back" data-q="close"></div>
     <div class="qs-panel" role="dialog" aria-modal="true" aria-label="Быстрая запись боли" tabindex="-1">
       <div class="spread qs-top"><b>${head}</b><button class="ghost" data-q="close" aria-label="Закрыть">✕</button></div>
+      ${qs.mode === 'ended' ? `<div class="qs-choice">
+        <button class="${qs.endChoice === 'recur' ? 'on' : ''}" data-q="endmode" data-v="recur"><b>Та же боль вернулась</b><small>после лекарства или сна</small></button>
+        <button class="${qs.endChoice === 'new' ? 'on' : ''}" data-q="endmode" data-v="new"><b>Новый приступ</b><small>отдельный, начался заново</small></button></div>` : ''}
       <div class="qs-val"><b id="qsNum">${v ?? '–'}</b><span id="qsWord">${v ? INTENSITY_WORDS[v] : 'от 1 до 10'}</span></div>
       <div class="scale ${v ? '' : 'empty'}" id="scale" role="slider" tabindex="0" aria-label="Сила боли от 1 до 10" aria-valuemin="1" aria-valuemax="10" aria-valuenow="${v || 0}">
         <i class="rest" style="width:${100 - (v || 0) * 10}%"></i><i class="knob" style="left:calc(${(v || 0) * 10}% - 24px);${v ? '' : 'display:none'}"></i>
@@ -1052,20 +1187,22 @@ async function refreshQuick() {
 
 async function commitPain(v) {
   if (!v) return;
-  const res = await api.logPain(v);
+  const res = await api.logPain(v, qs.mode === 'ended' ? qs.endChoice : 'recur');
+  const startedNew = qs.mode === 'ended' && qs.endChoice === 'new';
   // Undo is for a swipe that started an attack or reopened one; adjusting the strength needs only another swipe.
-  if (qs.undo === undefined && qs.mode !== 'open') { qs.undo = res.before; qs.undoText = qs.mode === 'new' ? 'Отменить эту запись' : 'Отменить: боль не вернулась'; }
+  if (qs.undo === undefined && qs.mode !== 'open') { qs.undo = res.before; qs.undoText = qs.mode === 'new' || startedNew ? 'Отменить эту запись' : 'Отменить: боль не вернулась'; }
   qs.mode = 'open';
   qs.ctx.today = (await api.day(today())).day;
-  qs.value = qs.ctx.today.attacks[0].intensity; // after a return the peak stays the higher of the two
-  toast(res.recurred ? `Отмечено: боль вернулась (пик — ${qs.value})` : `Записано: ${v} из 10`);
+  qs.value = qs.ctx.today.attacks.at(-1).intensity; // after a return the peak stays the higher of the two
+  toast(startedNew ? `Записан новый приступ: ${v} из 10` : res.recurred ? `Отмечено: боль вернулась (пик — ${qs.value})` : `Записано: ${v} из 10`);
   drawQuick();
 }
 
 async function quickAction(el) {
-  const a = qs.ctx.today?.attacks[0], d = today();
+  const a = qs.ctx.today?.attacks.at(-1), d = today();
   switch (el.dataset.q) {
     case 'close': closeQuick(); return;
+    case 'endmode': qs.endChoice = el.dataset.v; drawQuick(); return;
     case 'go': closeQuick(false); return; // the link itself navigates
     case 'undo':
       await api.restoreDay(d, qs.undo);
@@ -1125,7 +1262,7 @@ function overuseBanner(o) {
 // longer periods get the same spacing and scroll sideways, opening at the latest days.
 function chart(series) {
   const n = series.length, bw = n <= 31 ? 600 / n : 20, W = n * bw;
-  const H = 210, top = 8, bottom = 58, ph = H - top - bottom;
+  const H = 196, top = 8, bottom = 44, ph = H - top - bottom;
   const ps = series.map(p => p.pressure).filter(v => v != null);
   const pmin = Math.min(...ps), pmax = Math.max(...ps), pr = Math.max(pmax - pmin, 1);
   const bars = series.map((p, i) => {
@@ -1134,10 +1271,11 @@ function chart(series) {
     return `<rect x="${i * bw + bw * 0.15}" y="${top + ph - h}" width="${Math.max(bw * 0.7, 1)}" height="${h}" rx="2" fill="${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"><title>${fmtDate(p.date)}: ${p.intensity}/10</title></rect>`;
   }).join('');
   const line = ps.length > 1 ? `<polyline fill="none" stroke="var(--muted)" stroke-opacity=".8" stroke-width="1.5" stroke-linejoin="round" points="${series.map((p, i) => p.pressure == null ? null : `${i * bw + bw / 2},${top + ph - (p.pressure - pmin) / pr * ph}`).filter(Boolean).join(' ')}"/>` : '';
-  // Every day gets its date, written upwards so 30 of them fit side by side; Mondays are a little brighter.
+  // A day number under every bar, month names under the first day of each month; Mondays a little brighter.
   const axis = series.map((p, i) => {
-    const x = i * bw + bw / 2, y = top + ph + 8, mon = parseISO(p.date).getDay() === 1;
-    return `<text x="${x}" y="${y}" transform="rotate(-90 ${x} ${y})" dy="5" text-anchor="end" font-size="14" fill="${mon ? 'var(--text)' : 'var(--muted)'}">${Number(p.date.slice(8))}.${p.date.slice(5, 7)}</text>`;
+    const x = i * bw + bw / 2, dt = parseISO(p.date), first = i === 0 || dt.getDate() === 1;
+    return `<text x="${x}" y="${top + ph + 18}" text-anchor="middle" font-size="13" fill="${dt.getDay() === 1 ? 'var(--text)' : 'var(--muted)'}">${dt.getDate()}</text>
+      ${first ? `<text x="${Math.max(x - bw / 2, 0)}" y="${top + ph + 38}" font-size="13" fill="var(--muted)">${MONTHS_SHORT[dt.getMonth()]}</text>` : ''}`;
   }).join('');
   return `<div class="chartscroll"><svg class="chart" viewBox="0 0 ${W} ${H}" style="width:${W / 600 * 100}%" role="img" aria-label="Сила боли по дням и атмосферное давление">
     <rect x="0" y="${top + ph}" width="${W}" height="1" fill="var(--line)"/>${bars}${line}${axis}</svg></div>
@@ -1513,9 +1651,12 @@ async function renderSettings() {
 
     <h3>Код-пароль</h3>
     <div class="card">
-      <p class="muted" style="margin-top:0">${s.has_pin ? 'Код включён: дневник спрашивает его при открытии и после 5 минут в фоне.' : 'Чтобы дневник не открыл кто-то другой, взяв телефон.'} Код скрывает записи, но не шифрует их.</p>
+      <p class="muted" style="margin-top:0">${s.has_pin ? 'Код включён: дневник спрашивает его (или Face ID) при открытии и после 5 минут в фоне.' : 'Чтобы дневник не открыл кто-то другой, взяв телефон.'} Код скрывает записи, но не шифрует их.</p>
       <div class="row" style="flex-wrap:nowrap"><input id="pinNew" type="password" inputmode="numeric" maxlength="4" placeholder="4 цифры" style="flex:1;min-width:0" autocomplete="off">
         <button id="pinSet">${s.has_pin ? 'Сменить' : 'Включить'}</button></div>
+      ${s.has_pin ? `<div class="frow" id="faceRow" style="padding:12px 0 4px;border:0;display:none"><span class="fic">${FACE_SVG}</span>
+        <div class="fbody"><div class="flabel">Открывать по Face ID</div><div class="fval">Код останется запасным вариантом</div></div>
+        <button class="switch ${s.faceid ? 'on' : ''}" id="faceSw" role="switch" aria-checked="${!!s.faceid}" aria-label="Открывать по Face ID"></button></div>` : ''}
       ${s.has_pin ? '<button class="ghost danger wide" id="pinOff" style="margin-top:8px">Выключить код</button>' : ''}
     </div>
 
@@ -1528,7 +1669,8 @@ async function renderSettings() {
 
     <h3>Резервная копия</h3>
     <div class="card">
-      <p class="muted" style="margin-top:0">Все записи хранятся только в этом телефоне. ${s.last_backup ? `Последняя копия: ${fmtDateFull(iso(new Date(s.last_backup)))}.` : 'Копий ещё не было.'}</p>
+      ${backupDue(s) ? `<div class="banner warn" style="margin-top:0"><b>Пора сделать резервную копию</b><br>${s.last_backup ? `Последняя была ${fmtDateFull(iso(new Date(s.last_backup)))}.` : 'Копий ещё не было.'} Сохраните её в «Файлы» или iCloud Drive — раз в неделю достаточно.</div>` : ''}
+      <p class="muted" style="margin-top:0">Все записи хранятся только в этом телефоне. ${s.last_backup && !backupDue(s) ? `Последняя копия: ${fmtDateFull(iso(new Date(s.last_backup)))}.` : ''}</p>
       <button class="primary wide" id="backup">Сохранить копию в «Файлы»</button>
       <button class="wide" id="restoreBtn" style="margin-top:8px">Восстановить из копии</button>
       <input type="file" id="restoreFile" accept="application/json,.json" hidden>
@@ -1554,6 +1696,21 @@ async function renderSettings() {
     <div class="card">
       <p style="margin-top:0">Без сервера дневник не может сам присылать уведомления. Проще всего:</p>
       <p>«Напоминания» → новое напоминание «Заполнить дневник» → дата и время 21:00 → повтор «Ежедневно».</p>
+    </div>
+
+    <h3>Перенести старые записи</h3>
+    <div class="card">
+      <p class="muted" style="margin-top:0">Из Migrebot, таблицы Excel или Numbers, других приложений и даже бумажного дневника. То, что уже есть в Leria, не затирается, а повторный перенос ничего не задвоит.</p>
+      <button class="primary wide" id="impFile">Выбрать файл: .xlsx, .csv или .json</button>
+      <input type="file" id="impInput" accept=".xlsx,.csv,.json,.txt" hidden>
+      <button class="wide" id="impTemplate" style="margin-top:8px">Скачать шаблон таблицы</button>
+      <details class="impai"><summary>Через ИИ: фото дневника, PDF, заметки</summary>
+        <ol class="muted"><li>Скопируйте запрос и отправьте его в любой ИИ (ChatGPT, Claude, Gemini) вместе с фото, файлами или текстом.</li>
+          <li>Скопируйте ответ ИИ целиком и вставьте ниже.</li></ol>
+        <button class="wide" id="impAiCopy">Скопировать запрос для ИИ</button>
+        <textarea id="impAiText" placeholder="Вставьте сюда ответ ИИ" style="margin-top:8px;min-height:90px"></textarea>
+        <button class="primary wide" id="impAiGo" style="margin-top:8px">Перенести</button>
+      </details>
     </div>
 
     <h3>Экспорт</h3>
@@ -1646,6 +1803,14 @@ async function renderSettings() {
   $('pinSet').onclick = async () => {
     try { await api.setPin($('pinNew').value); unlocked = true; toast('Код сохранён'); renderSettings(); } catch (err) { toast(err.message); }
   };
+  if ($('faceRow')) faceIdAvailable().then(ok => { if (ok) $('faceRow').style.display = ''; });
+  if ($('faceSw')) $('faceSw').onclick = async () => {
+    try {
+      if (s.faceid) { await api.setFaceId(null); toast('Face ID выключен'); }
+      else { await faceIdEnroll(); toast('Face ID включён'); }
+      renderSettings();
+    } catch (err) { toast(err.name === 'NotAllowedError' ? 'Отменено' : 'Не получилось включить Face ID'); }
+  };
   if ($('pinOff')) $('pinOff').onclick = async () => { await api.setPin(null); toast('Код выключен'); renderSettings(); };
   $('attackDim').oninput = e => pref.set('attack_dim', e.target.value);
   $('wipe').onclick = async () => {
@@ -1700,12 +1865,52 @@ async function renderSettings() {
     try { await saveHealth(await navigator.clipboard.readText()); } catch { toast('Не получилось прочитать буфер — вставьте текст в поле'); }
   };
   $('healthSave').onclick = () => saveHealth($('healthText').value);
+  // ---- import ----
+  const runImport = async found => {
+    if (found.backup) return toast('Это резервная копия Leria — восстановите её в разделе «Резервная копия»');
+    const recs = found.records, pain = recs.filter(r => r.headache || r.attacks.length);
+    const n = recs.reduce((k, r) => k + r.attacks.length, 0);
+    const medNames = [...new Set(recs.flatMap(r => r.attacks.flatMap(a => a.doses.map(x => x.name))))];
+    const span = recs.map(r => r.date).sort();
+    if (!recs.length) return toast('Не нашёл записей');
+    const ok = await ask(`Нашёл ${recs.length} ${plural(recs.length, 'день', 'дня', 'дней')} с ${fmtDate(span[0])} ${span[0].slice(0, 4)} по ${fmtDate(span.at(-1))} ${span.at(-1).slice(0, 4)}: с болью — ${pain.length}, приступов — ${n}${medNames.length ? `, лекарства: ${medNames.slice(0, 5).join(', ')}${medNames.length > 5 ? '…' : ''}` : ''}. Перенести в Leria?`, { ok: 'Перенести' });
+    if (!ok) return;
+    const r = await api.importDays(recs, imp.medKind);
+    CFG = null;
+    await loadBase();
+    toast(!r.days ? 'Всё это уже есть в Leria — ничего нового'
+      : `Перенесено: ${r.days} ${plural(r.days, 'день', 'дня', 'дней')}, ${r.attacks} ${plural(r.attacks, 'приступ', 'приступа', 'приступов')}${r.meds ? `, новых лекарств: ${r.meds}` : ''}`);
+    renderSettings();
+  };
+  $('impFile').onclick = () => $('impInput').click();
+  $('impInput').onchange = async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try { await runImport(imp.recognise(await imp.readFile(file))); } catch (err) { toast(err.message); }
+  };
+  $('impTemplate').onclick = () => {
+    const row = r => r.map(x => `"${String(x).replace(/"/g, '""')}"`).join(';');
+    shareFile('leria-шаблон.csv', '\uFEFF' + [row(imp.TEMPLATE_COLUMNS), row(imp.TEMPLATE_EXAMPLE)].join('\r\n') + '\r\n', 'text/csv').catch(err => toast(err.message));
+  };
+  $('impAiCopy').onclick = async () => toast(await copyText(imp.AI_IMPORT_PROMPT) ? 'Скопировано — отправьте в ИИ вместе с записями' : 'Не удалось скопировать');
+  $('impAiGo').onclick = async () => {
+    const text = $('impAiText').value.trim();
+    const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
+    try { await runImport(imp.recognise({ json: JSON.parse(json) })); $('impAiText').value = ''; }
+    catch (err) { toast(err instanceof SyntaxError ? 'Не похоже на ответ ИИ — скопируйте его целиком' : err.message); }
+  };
   $('exportCsv').onclick = async () => {
     try { await shareFile(`дневник-${today()}.csv`, csv ?? await api.csv(), 'text/csv'); } catch (err) { toast(err.message); }
   };
 }
 
 // ---------- boot ----------
+
+// Pinch zoom off, like a native app (iOS ignores user-scalable=no in the page itself).
+for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, e => e.preventDefault(), { passive: false });
+document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+
 
 applyTheme(pref.get('theme', 'moss'));
 applyDim();

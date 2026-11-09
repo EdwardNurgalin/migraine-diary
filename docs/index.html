@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Leria — дневник головной боли</title>
   <meta name="description" content="Leria — дневник головной боли. Все записи хранятся только на вашем телефоне.">
   <meta name="theme-color" content="#171c1a">
@@ -26,11 +26,11 @@
 <body>
   <main id="view" aria-live="polite"></main>
   <nav class="tabs" aria-label="Разделы">
-    <a href="#diary" data-tab="diary"><span class="ico">✎</span>Дневник</a>
-    <a href="#calendar" data-tab="calendar"><span class="ico">▦</span>Календарь</a>
+    <a href="#diary" data-tab="diary"><span class="ico"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span>Дневник</a>
+    <a href="#calendar" data-tab="calendar"><span class="ico"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg></span>Календарь</a>
     <button id="fab" class="tabpain" aria-label="Записать боль"><span class="ico"><i aria-hidden="true"><svg viewBox="0 0 24 12" width="22" height="11"><path d="M3 6C5.5 0 9.5 0 12 6S18.5 12 21 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></i></span>Болит</button>
-    <a href="#data" data-tab="data"><span class="ico">◔</span>Мои данные</a>
-    <a href="#settings" data-tab="settings"><span class="ico">⚙</span>Настройки</a>
+    <a href="#data" data-tab="data"><span class="ico"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20v-7M12 20V5M19 20v-10"/></svg></span>Мои данные</a>
+    <a href="#settings" data-tab="settings"><span class="ico"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg></span>Настройки</a>
   </nav>
   <div id="sheet"></div>
   <div id="toast" role="status"></div>
