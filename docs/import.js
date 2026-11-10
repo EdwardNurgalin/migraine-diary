@@ -92,10 +92,10 @@ export async function readFile(file) {
 
 const has = (s, re) => re.test(String(s || '').toLowerCase());
 const WORDS = {
-  location: [[/лев|left/, 'left'], [/прав|right/, 'right'], [/обе|двух|both|вся голова|всей/, 'both'], [/лоб|лба|forehead/, 'forehead'],
+  location: [[/лев|left/, 'left'], [/прав|right/, 'right'], [/обе|двух|both|вся голова|всей|опоясыв/, 'both'], [/лоб|лба|forehead/, 'forehead'],
     [/висок|виск|temple/, 'temples'], [/затыл|back|шея/, 'back'], [/глаз|eye/, 'eye']],
-  character: [[/пульс|pulsat|throb/, 'pulsating'], [/давящ|давит|давлен|press/, 'pressing'], [/сжим|squeez|обруч/, 'squeezing'],
-    [/кол[юи]|остр|stab/, 'stabbing'], [/туп|dull/, 'dull']],
+  character: [[/пульс|pulsat|throb/, 'pulsating'], [/дав[яиле]|press/, 'pressing'], [/сжим|сдавлив|squeez|обруч/, 'squeezing'],
+    [/кол[юио]|остр|пронз|прострел|stab/, 'stabbing'], [/туп|dull/, 'dull']],
   symptoms: [[/тошн|nause/, 'nausea'], [/рвот|vomit/, 'vomiting'], [/свет|photo/, 'photo'], [/звук|шум|phono/, 'phono'],
     [/запах|smell|osmo/, 'smell'], [/аур|aura/, 'aura'], [/головокр|dizz/, 'dizziness'], [/движ|нагруз|movement|activity/, 'movement']],
 };
@@ -109,7 +109,7 @@ export function effectOf(text) {
 }
 
 const MED_KINDS = [
-  [/триптан|амигренин|релпакс|имигран|зомиг|нарамиг|максальт|сумамигрен|тригрим|рапимед|triptan/, 'triptan'],
+  [/триптан|капориз|ризоптан|риза|амигренин|релпакс|имигран|зомиг|нарамиг|максальт|сумамигрен|тригрим|рапимед|triptan/, 'triptan'],
   [/цитрамон|пенталгин|каффетин|солпадеин|спазмалгон|экседрин|аскофен|excedrin/, 'combo'],
   [/кодеин|трамадол|tramadol|codeine/, 'opioid'],
   [/эрготамин|дигидроэрго|ergot/, 'ergot'],
@@ -249,6 +249,63 @@ export const AI_IMPORT_PROMPT = `Ты помогаешь перенести за
 - Ничего не придумывай: чего нет в записях — ставь null или пустой список. Всё неясное, но важное, пиши в note.`;
 
 /** Recognise the file and turn it into records; `source` names what it was for the summary. */
+// ---------- Migrebot (Telegram bot) export ----------
+// One row per evening survey. «Время» is when the survey was answered, not when the pain began; pain start and end
+// are words («Утром», «Днём») or times; medicines come as one line: «Капориза 10 мг и Налгезин 550 мг, Помогло».
+
+const isMigrebot = head => ['признаки мигрени', 'фотофобия', 'принятые медикаменты'].every(h => head.some(x => String(x).toLowerCase().trim() === h));
+const PART_OF_DAY = { утром: 'утром', днём: 'днём', днем: 'днём', вечером: 'вечером', ночью: 'ночью' };
+
+export function fromMigrebot(rows) {
+  const head = rows[0].map(h => String(h).toLowerCase().trim());
+  const ix = name => head.indexOf(name);
+  const get = (r, name) => String(ix(name) >= 0 ? r[ix(name)] ?? '' : '').trim();
+  const yesNo = (r, name) => /^да$/i.test(get(r, name));
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const date = dateOf(r[ix('дата')]);
+    if (!date) continue;
+    const comment = get(r, 'комментарии'), triggers = get(r, 'триггеры');
+    const rec = { date, headache: yesNo(r, 'головная боль'), period: yesNo(r, 'менструальный цикл'), sleep_hours: null, doses: [], attacks: [],
+      note: [triggers && `Migrebot, триггеры: ${triggers.toLowerCase()}`, comment].filter(Boolean).join('. ') };
+    if (rec.headache) {
+      const startRaw = get(r, 'начало боли'), endRaw = get(r, 'окончание боли');
+      const when = [PART_OF_DAY[startRaw.toLowerCase()] && `началась ${PART_OF_DAY[startRaw.toLowerCase()]}`,
+        PART_OF_DAY[endRaw.toLowerCase()] && `закончилась ${PART_OF_DAY[endRaw.toLowerCase()]}`].filter(Boolean);
+      const level = intensityOf(get(r, 'интенсивность боли'));
+      const where = get(r, 'локализация'), kind = get(r, 'характер');
+      const symptoms = [...pick(where, 'symptoms')];
+      if (yesNo(r, 'аура')) symptoms.push('aura');
+      if (yesNo(r, 'тошнота')) symptoms.push('nausea');
+      if (yesNo(r, 'фотофобия')) symptoms.push('photo');
+      if (yesNo(r, 'фонофобия')) symptoms.push('phono');
+      if (yesNo(r, 'нагрузки')) symptoms.push('movement');
+      // «Капориза 10 мг и Налгезин 550 мг, Помогло» → two doses with the shared result.
+      const medsRaw = get(r, 'принятые медикаменты');
+      const doses = [];
+      if (medsRaw && !/^нет$/i.test(medsRaw)) {
+        const cut = medsRaw.lastIndexOf(',');
+        const list = cut > 0 ? medsRaw.slice(0, cut) : medsRaw, result = cut > 0 ? medsRaw.slice(cut + 1) : '';
+        for (const part of list.split(/\s+и\s+|;|\+/)) {
+          const m = part.trim().match(/^(.*?)\s*(\d+[.,]?\d*\s*(?:мг|мкг|г|мл|таб\S*|шт)?)?$/i);
+          if (m && m[1]) doses.push({ name: m[1].trim(), dose: (m[2] || '').trim(), time: null, effect: effectOf(result) });
+        }
+      }
+      rec.attacks.push({
+        start_time: timeOf(startRaw), end_time: timeOf(endRaw) || null,
+        // The bot asks for strength only in the long survey; without it the attack is kept as moderate and says so.
+        intensity: level || 5,
+        location: pick(where, 'location'), character: [...new Set([...pick(kind, 'character'), ...pick(where, 'character')])],
+        symptoms: [...new Set(symptoms)],
+        note: [...when, !level && 'сила не была записана в Migrebot'].filter(Boolean).join(', '),
+        doses,
+      });
+    }
+    out.push(rec);
+  }
+  return out;
+}
+
 export function recognise(read) {
   if (read.json) {
     if (read.json.format === 'headache-diary-backup') return { backup: true };
@@ -260,6 +317,7 @@ export function recognise(read) {
     // The header row may not be the first one (titles above the table): take the first row that has a date column.
     const at = sh.rows.findIndex(r => r.some(x => /дата|date/i.test(String(x))));
     if (at < 0) continue;
+    if (isMigrebot(sh.rows[at])) return { source: 'Migrebot', records: fromMigrebot(sh.rows.slice(at)) };
     const recs = fromTable(sh.rows.slice(at));
     if (recs?.length) return { source: sh.name, records: recs };
   }

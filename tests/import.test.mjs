@@ -51,3 +51,21 @@ test('a 1–3 scale is stretched to 1–10; a bare "Время" column is the st
   const r = fromTable([['Дата', 'Время', 'Интенсивность'], ['01.04.2026', '9:00', '2'], ['02.04.2026', '18:00', '3']]);
   assert.deepEqual(r.map(x => [x.attacks[0].start_time, x.attacks[0].intensity]), [['09:00', 7], ['18:00', 10]]);
 });
+
+test('Migrebot export: survey time is not the pain start; medicines split; yes/no columns become symptoms', () => {
+  const head = ['Дата', 'Время', 'Головная боль', 'Признаки мигрени', 'Аура', 'Менструальный цикл', 'Принятые медикаменты', 'Интенсивность боли', 'Локализация', 'Характер', 'Нагрузки', 'Тошнота', 'ФоТофобия', 'ФоНофобия', 'Триггеры', 'Начало боли', 'Окончание боли', 'Комментарии'];
+  const rows = [head,
+    ['2026-10-05', '19:15', 'Да', 'Да', 'Да', 'Нет', 'Капориза 10 мг и Налгезин 550 мг, Помогло', '3', 'Слева', 'Пульсировала', 'Да', 'Нет', 'Да', 'Да', 'Мало сна', 'Утром', 'Днём', 'легла спать'],
+    ['2026-10-06', '20:10', 'Нет', '', 'Нет', 'Да', '', '', '', '', '', '', '', '', '', '', '', ''],
+  ];
+  const f = recognise({ sheets: [{ name: 'Записи опросов', rows }] });
+  assert.equal(f.source, 'Migrebot');
+  const [a] = f.records[0].attacks;
+  assert.equal(a.start_time, null);
+  assert.equal(a.intensity, 3);
+  assert.deepEqual(a.symptoms.sort(), ['aura', 'movement', 'phono', 'photo']);
+  assert.deepEqual(a.doses.map(x => [x.name, x.dose, x.effect]), [['Капориза', '10 мг', 'full'], ['Налгезин', '550 мг', 'full']]);
+  assert.equal(medKind('Капориза'), 'triptan');
+  assert.match(f.records[0].note, /мало сна/);
+  assert.deepEqual([f.records[1].headache, f.records[1].period], [false, true]);
+});
