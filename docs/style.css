@@ -105,8 +105,8 @@ label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px;
 .tbtn.empty { color: var(--faint); }
 .tcompact { width: 96px; flex: none; }
 .tp {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 81; max-width: 560px; margin: 0 auto;
-  background: var(--surface); border-radius: 20px 20px 0 0; padding: 8px 12px calc(16px + env(safe-area-inset-bottom));
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 81; width: min(400px, calc(100% - 24px));
+  background: var(--surface); border-radius: 22px; padding: 8px 14px 14px; box-shadow: 0 10px 34px rgba(0, 0, 0, .4);
 }
 .tp-head { display: flex; align-items: center; justify-content: space-between; }
 .tp-head b { font-weight: 500; }
@@ -614,3 +614,7 @@ details.impai ol li { margin-bottom: 4px; }
 html:has(body.calfit), body.calfit { overflow: hidden; overscroll-behavior: none; height: 100%; }
 body.calfit .calarea { touch-action: none; min-height: 0; }
 body.calfit #peek .peek { margin-top: 12px; }
+
+/* Calendar day preview: information only; the whole card opens the day for editing. */
+.peek.tap { cursor: pointer; }
+.peek.tap .peekhead b::after { content: " ›"; color: var(--faint); font-weight: 400; }

@@ -1076,39 +1076,35 @@ async function showPeek(date, cyc) {
   const el = document.getElementById('peek');
   const dt = parseISO(date), title = `${dt.getDate()} ${MONTHS_GEN[dt.getMonth()]} <small>${WEEKDAYS[dt.getDay()]}</small>`;
   const w = data.weather;
+  // Information only; tapping the card goes on to edit the day (an empty day opens its «Болела ли голова?»).
+  const go = data.day ? `#log/${date}/${data.day.headache ? 'yes' : 'no'}` : `#diary/${date}`;
   if (!data.day) {
-    el.innerHTML = `<div class="peek">
+    el.innerHTML = `<div class="peek tap" role="link" tabindex="0" aria-label="Заполнить ${fmtDate(date)}">
       <div class="spread peekhead"><b>${title}</b><span class="muted">не заполнен</span></div>
-      ${cd || w ? `<div class="kv"><span>${cd ? 'Цикл' : 'Погода'}</span><span>${cd ? `${cd}-й день` : `${w.pressure ?? '—'} гПа, ${w.temp ?? '—'}°C`}</span></div>` : ''}
-      ${cd && w ? `<div class="kv"><span>Погода</span><span>${w.pressure ?? '—'} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta})` : ''}, ${w.temp ?? '—'}°C</span></div>` : ''}
-      <div class="peekbtns"><button data-peek-nopain>Не болела</button><a class="btn primary" href="#log/${date}/yes">Болела</a></div>
-      <a class="peeklink" href="#log/${date}/no">Заполнить день подробно</a></div>`;
-    el.querySelector('[data-peek-nopain]').onclick = async () => {
-      await api.markNoPain(date);
-      toast('Отмечено: без боли');
-      renderCalendar(date.slice(0, 7)).then(() => showPeek(date, cyc));
-    };
+      ${cd ? `<div class="kv"><span>Цикл</span><span>${cd}-й день</span></div>` : ''}
+      ${w ? `<div class="kv"><span>Погода</span><span>${w.pressure ?? '—'} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta})` : ''}, ${w.temp ?? '—'}°C</span></div>` : ''}
+      <p class="muted" style="margin:8px 0 0">Нажмите, чтобы заполнить день</p></div>`;
   } else {
     const type = dayType(data);
-    el.innerHTML = `<div class="peek">
+    el.innerHTML = `<div class="peek tap" role="link" tabindex="0" aria-label="Изменить запись за ${fmtDate(date)}">
       <div class="spread peekhead"><b>${title}</b><span style="color:${TYPE_COLOR[type]}">${L.types[type].toLowerCase()}</span></div>
-      ${dayRows(data, cd).map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('')}
-      <div class="peekbtns"><a class="btn" href="#log/${date}/${data.day.headache ? 'yes' : 'no'}">Изменить</a><a class="btn" href="#diary/${date}">Открыть день</a></div></div>`;
+      ${dayRows(data, cd).map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('')}</div>`;
   }
+  const card = el.querySelector('.peek');
+  card.onclick = () => { location.hash = go; };
+  card.onkeydown = e => { if (e.key === 'Enter') location.hash = go; };
   fitPeek(el);
 }
 
-// Keep the day details inside the screen: drop the last rows that don't fit and say how many are hidden.
+// Keep the day details inside the screen: drop the last rows that don't fit (the full day is one tap away).
 function fitPeek(el) {
   if (!document.body.classList.contains('calfit')) return;
   const peek = el.querySelector('.peek'), bar = document.querySelector('.tabs');
   if (!peek || !bar) return;
   const room = bar.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
   const rows = [...peek.querySelectorAll('.kv')];
-  let hidden = 0;
-  while (peek.offsetHeight > room && rows.length) { rows.pop().remove(); hidden++; }
-  const open = peek.querySelector('a[href^="#diary/"]');
-  if (hidden && open) open.textContent = `Ещё ${hidden} строк${hidden === 1 ? 'а' : hidden < 5 ? 'и' : ''} →`;
+  while (peek.offsetHeight > room && rows.length) rows.pop().remove();
+
 }
 
 // The month as a readable log: newest day first, one row per day.
