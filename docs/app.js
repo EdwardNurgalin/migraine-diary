@@ -334,8 +334,11 @@ async function renderDiary(d) {
     ${!day.day ? '' : isToday ? `<details class="daymore"><summary>Подробности дня</summary>${dayCard(day)}</details>` : dayCard(day)}
     ${isToday ? riskCard(h.risk) + medsMeter(h.overuse) + monthTiles(h) + missedCard(h.missed) : ''}`;
 
-  const weeksEl = $view.querySelector('.weeks'), cur = weeksEl.querySelector(`[data-wk="${monday(d)}"]`);
+  // Open on the week of the chosen day (its Monday at the left edge), without a visible scroll.
+  const weeksEl = $view.querySelector('.weeks'), cur = weeksEl.querySelector(`[data-wk="${monday(d)}"] .wd`);
+  weeksEl.style.scrollBehavior = 'auto';
   weeksEl.scrollLeft = cur.offsetLeft - weeksEl.offsetLeft;
+  weeksEl.style.scrollBehavior = '';
   const again = () => renderDiary(d).catch(err => toast(err.message));
   $view.querySelectorAll('[data-eff]').forEach(b => b.onclick = async () => {
     const { date, ai, di, eff } = b.dataset, taken = b.dataset.taken;
@@ -494,29 +497,37 @@ const showInstallHint = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && !s
 const dayType = data => !data.day.headache ? 'none' : data.attacks.some(x => x.migraine) ? 'migraine' : 'headache';
 const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${doseOf(x) ? ' ' + esc(doseOf(x)) : ''}${x.time ? ' в ' + x.time : ''}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}${x.relief_time ? ` в ${x.relief_time}${x.time ? ` (через ${fmtMinutes(minsBetween(x.time, x.relief_time))})` : ''}` : ''}`; };
 
-function dayCard(data) {
-  const day = data.day, type = dayType(data), many = data.attacks.length > 1;
+// Everything recorded for a day, as label/value rows: used by the day card and by the calendar's day preview.
+function dayRows(data, cycleDay = null) {
+  const day = data.day, many = data.attacks.length > 1;
   const exposed = Object.entries(day.factors).map(([k, v]) => [factorDef(k), v]).filter(([f, v]) => f.type && isExposed(f, v));
   const allDoses = [...data.attacks.flatMap(x => x.doses), ...data.doses];
   const w = data.weather;
   const rows = [];
   data.attacks.forEach((a, i) => {
-    const time = a.start_time ? `${a.start_time}${a.end_time ? ' – ' + a.end_time : ' – ещё болит'}` : '—';
-    if (many) rows.push([`Приступ ${i + 1}`, `<b>${time}</b> · сила ${a.intensity}${a.migraine ? ' · похоже на мигрень' : ''}`]);
+    const time = a.start_time ? `${a.start_time}${a.end_time ? ' – ' + a.end_time : ' – ещё болит'}` : a.end_time ? `до ${a.end_time}` : '';
+    if (many) rows.push([`Приступ ${i + 1}`, `${time ? `<b>${time}</b> · ` : ''}сила ${a.intensity}${a.migraine ? ' · похоже на мигрень' : ''}`]);
     else {
-      rows.push(['Время', time]);
+      if (time) rows.push(['Время', time]);
       rows.push(['Сила', `${a.intensity} из 10 · ${INTENSITY_WORDS[a.intensity]}`]);
     }
     if (a.location.length || a.character.length) rows.push([many ? '' : 'Боль', esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character)].filter(Boolean).join('; '))]);
     if (a.symptoms.length) rows.push([many ? '' : 'Симптомы', esc(labelsOf(L.symptoms, a.symptoms))]);
     if (a.recurred) rows.push([many ? '' : 'Повтор', 'боль возвращалась']);
+    if (a.note) rows.push([many ? '' : 'О приступе', esc(a.note)]);
   });
   if (allDoses.length) rows.push(['Лекарства', allDoses.map(doseText).join('<br>')]);
   if (day.sleep_hours != null) rows.push(['Сон', `${fmtHours(day.sleep_hours)}${day.sleep_start && day.sleep_end ? ` · ${day.sleep_start}–${day.sleep_end}` : ''}`]);
-  if (day.period) rows.push(['Цикл', 'Менструация']);
+  if (day.period) rows.push(['Цикл', `Менструация${cycleDay ? ` · ${cycleDay}-й день` : ''}`]);
+  else if (cycleDay) rows.push(['Цикл', `${cycleDay}-й день`]);
   if (exposed.length) rows.push(['Факторы', `<div class="tags">${exposed.map(([f, v]) => `<span class="tag">${f.icon} ${esc(f.label)}${f.type !== 'bool' ? ': ' + factorValueText(f, v).toLowerCase() : ''}</span>`).join('')}</div>`]);
   if (w) rows.push(['Погода', `${w.pressure ?? '—'} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta})` : ''}, ${w.temp ?? '—'}°C`]);
   if (day.note) rows.push(['Заметка', esc(day.note)]);
+  return rows;
+}
+
+function dayCard(data) {
+  const day = data.day, type = dayType(data), rows = dayRows(data);
   return `
     <div class="daycard">
       <div class="dc-head"><i style="background:${TYPE_COLOR[type]}"></i><b>${L.types[type]}</b><span>${fmtDate(data.date)}</span></div>
@@ -950,6 +961,8 @@ function overuseText(o) {
 }
 
 const calWheel = { acc: 0, locked: false, timer: 0 };
+// Direction of the month change in progress, so the new month slides in from the right side.
+const calSlide = { dir: 0 };
 
 async function renderCalendar(ym) {
   const [data, cyc] = await Promise.all([api.month(ym), api.cycle()]);
@@ -968,9 +981,9 @@ async function renderCalendar(ym) {
         <button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div>
       <button class="cbtn info" data-cal-info aria-label="Обозначения и что показывать">i</button>
     </div>
-    ${list ? sum + chronology(data, pr) : monthGrid(data, cyc, pr, ym) + sum + '<div id="peek"></div>'}</div>`;
+    <div class="calbody">${list ? sum + chronology(data, pr) : monthGrid(data, cyc, pr, ym) + sum + '<div id="peek"></div>'}</div></div>`;
 
-  $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
+  $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => flip(b.dataset.go < ym ? -1 : 1));
   $view.querySelector('[data-cal-info]').onclick = () => {
     const sw = (k, on, label, mark) => `<div class="frow optrow"><span class="lg-size">${mark}</span><div class="fbody"><div class="flabel">${label}</div></div>
       <button class="switch ${on ? 'on' : ''}" data-cal-toggle="${k}" role="switch" aria-checked="${on}" aria-label="${label}"></button></div>`;
@@ -995,30 +1008,50 @@ async function renderCalendar(ym) {
     });
   };
   // Swipe left or right on the month to change it: a finger on the phone, two fingers on a Mac trackpad.
-  const area = $view.querySelector('.calarea');
+  // The month follows the finger, slides off, and the next one slides in from the other side.
+  const area = $view.querySelector('.calarea'), body = $view.querySelector('.calbody');
+  const slideIn = calSlide.dir;
+  calSlide.dir = 0;
+  if (slideIn) {
+    body.style.transition = 'none';
+    body.style.transform = `translateX(${slideIn * 40}%)`;
+    body.style.opacity = '0';
+    body.getBoundingClientRect();
+    body.style.transition = '';
+    body.style.transform = '';
+    body.style.opacity = '';
+    // If the phone skips frames (power saving, app in the background), never leave the month half-faded.
+    setTimeout(() => body.getAnimations?.().forEach(a => a.finish()), 400);
+  }
   const flip = dir => {
-    if (dir < 0) location.hash = `#calendar/${prev}`;
-    else if (next <= t.slice(0, 7)) location.hash = `#calendar/${next}`;
-    else toast('Это текущий месяц');
+    const target = dir < 0 ? prev : next;
+    if (dir > 0 && next > t.slice(0, 7)) { body.style.transform = ''; toast('Это текущий месяц'); return; }
+    calSlide.dir = dir;
+    body.style.transform = `translateX(${-dir * 40}%)`;
+    body.style.opacity = '0';
+    setTimeout(() => { location.hash = `#calendar/${target}`; }, 180);
   };
-  let sx = null, sy = 0;
-  area.addEventListener('pointerdown', e => { sx = e.clientX; sy = e.clientY; });
+  let sx = null, sy = 0, dragging = false;
+  area.addEventListener('pointerdown', e => { sx = e.clientX; sy = e.clientY; dragging = false; });
   area.addEventListener('pointermove', e => {
     if (sx == null) return;
     const dx = e.clientX - sx, dy = e.clientY - sy;
-    if (Math.abs(dx) > Math.abs(dy)) area.style.transform = `translateX(${Math.max(-60, Math.min(60, dx / 3))}px)`;
+    if (!dragging && Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) { dragging = true; body.style.transition = 'none'; }
+    if (dragging) body.style.transform = `translateX(${dx}px)`;
   });
   const end = e => {
-    area.style.transform = '';
     if (sx == null) return;
     const dx = e.clientX - sx, dy = e.clientY - sy;
     sx = null;
-    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+    body.style.transition = '';
+    if (!dragging) return;
+    dragging = false;
+    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.2) { body.style.transform = ''; return; }
     area.dataset.swiped = '1';
     flip(dx > 0 ? -1 : 1);
   };
   area.addEventListener('pointerup', end);
-  area.addEventListener('pointercancel', () => { sx = null; area.style.transform = ''; });
+  area.addEventListener('pointercancel', () => { sx = null; dragging = false; body.style.transition = ''; body.style.transform = ''; });
   area.addEventListener('wheel', e => {
     if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
     e.preventDefault();
@@ -1050,30 +1083,34 @@ function monthGrid(data, cyc, pr, ym) {
     <div class="cal">${DOW.map(d => `<div class="dow">${d.toLowerCase()}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>`;
 }
 
+// Tapping a day shows everything recorded for it right under the month, with the actions that make sense.
 async function showPeek(date, cyc) {
   const data = await api.day(date);
   $view.querySelectorAll('.cd .num').forEach(el => el.classList.toggle('sel', el.closest('[data-day]').dataset.day === date));
   const cd = CFG.trackCycle ? cyc.dayOf(date) : null;
   const el = document.getElementById('peek');
+  const dt = parseISO(date), title = `${dt.getDate()} ${MONTHS_GEN[dt.getMonth()]} <small>${WEEKDAYS[dt.getDay()]}</small>`;
+  const w = data.weather;
   if (!data.day) {
-    el.innerHTML = `<div class="peek"><div class="spread"><b>${fmtDate(date)}</b><a href="#diary/${date}">Заполнить</a></div>
-      <p>Нет записи${cd ? ` · ${cd}-й день цикла` : ''}</p></div>`;
-    return;
+    el.innerHTML = `<div class="peek">
+      <div class="spread peekhead"><b>${title}</b><span class="muted">не заполнен</span></div>
+      ${cd || w ? `<div class="kv"><span>${cd ? 'Цикл' : 'Погода'}</span><span>${cd ? `${cd}-й день` : `${w.pressure ?? '—'} гПа, ${w.temp ?? '—'}°C`}</span></div>` : ''}
+      ${cd && w ? `<div class="kv"><span>Погода</span><span>${w.pressure ?? '—'} гПа${w.pressure_delta != null ? ` (${w.pressure_delta > 0 ? '+' : ''}${w.pressure_delta})` : ''}, ${w.temp ?? '—'}°C</span></div>` : ''}
+      <div class="peekbtns"><button data-peek-nopain>Не болела</button><a class="btn primary" href="#log/${date}/yes">Болела</a></div>
+      <a class="peeklink" href="#log/${date}/no">Заполнить день подробно</a></div>`;
+    el.querySelector('[data-peek-nopain]').onclick = async () => {
+      await api.markNoPain(date);
+      toast('Отмечено: без боли');
+      renderCalendar(date.slice(0, 7)).then(() => showPeek(date, cyc));
+    };
+  } else {
+    const type = dayType(data);
+    el.innerHTML = `<div class="peek">
+      <div class="spread peekhead"><b>${title}</b><span style="color:${TYPE_COLOR[type]}">${L.types[type].toLowerCase()}</span></div>
+      ${dayRows(data, cd).map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('')}
+      <div class="peekbtns"><a class="btn" href="#log/${date}/${data.day.headache ? 'yes' : 'no'}">Изменить</a><a class="btn" href="#diary/${date}">Открыть день</a></div></div>`;
   }
-  const type = dayType(data), at = data.attacks;
-  const doses = [...at.flatMap(x => x.doses), ...data.doses];
-  const parts = [
-    at.length > 1 && `${at.length} ${plural(at.length, 'приступ', 'приступа', 'приступов')}`,
-    at.length && `сила ${Math.max(...at.map(x => x.intensity))}`,
-    ...at.filter(x => x.start_time).map(x => `${x.start_time}${x.end_time ? '–' + x.end_time : ''}`),
-    doses.length && doses.map(doseText).join(', '),
-    data.day.period ? 'менструация' : cd && `${cd}-й день цикла`,
-    data.day.sleep_hours != null && `сон ${data.day.sleep_hours} ч`,
-  ].filter(Boolean);
-  el.innerHTML = `<div class="peek">
-    <div class="spread"><b>${fmtDate(date)}</b><span style="color:${TYPE_COLOR[type]}">${L.types[type].toLowerCase()}</span></div>
-    ${parts.length ? `<p>${parts.join(' · ')}</p>` : ''}
-    <a href="#diary/${date}">Открыть день</a></div>`;
+  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 // The month as a readable log: newest day first, one row per day.

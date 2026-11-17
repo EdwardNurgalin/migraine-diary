@@ -5,7 +5,7 @@
 // changed sw.js, this worker downloads every file of the new version fresh, takes over, and the page reloads
 // once into it. Files of two versions are never mixed.
 // Bump VERSION on every release so phones pick up the new files.
-const VERSION = 'diary-v20';
+const VERSION = 'diary-v21';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './api.js', './config.js', './stats.js', './store.js', './weather.js', './import.js',
   './manifest.webmanifest', './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',

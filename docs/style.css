@@ -60,7 +60,10 @@ body {
 }
 body.wizard { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
 body.wizard .tabs { display: none; }
-main { max-width: 560px; margin: 0 auto; padding: calc(14px + env(safe-area-inset-top)) 16px 24px; }
+/* Room under the iPhone status bar: newer iOS dims whatever sits right under it, so the first line starts lower. */
+main { max-width: 560px; margin: 0 auto; padding: calc(30px + env(safe-area-inset-top)) 16px 24px; }
+/* An opaque band behind the status bar, so scrolled content never shows through it. */
+body::before { content: ""; position: fixed; left: 0; right: 0; top: 0; height: env(safe-area-inset-top); background: var(--bg); z-index: 30; }
 h1, .title { font-size: 26px; font-weight: 500; color: var(--accent); margin: 6px 0 14px; }
 h2 { font-size: 17px; font-weight: 500; margin: 0 0 10px; }
 h3 { font-size: 13px; letter-spacing: .3px; margin: 20px 0 8px; color: var(--muted); font-weight: 500; }
@@ -163,9 +166,11 @@ label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px;
 
 /* ---- diary home ---- */
 .weekstrip { margin: 6px -4px 20px; }
-.weeks { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain; }
+.weeks { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
 .weeks::-webkit-scrollbar { display: none; }
-.weeks .wk { flex: 0 0 100%; display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; scroll-snap-align: start; scroll-snap-stop: always; }
+/* Days glide one by one (snap to every day, no stop at weeks), like the time drums. */
+.weeks .wk { display: contents; }
+.weeks .wd { flex: 0 0 calc(100% / 7); scroll-snap-align: start; }
 .weekstrip .wd { text-decoration: none; color: var(--text); text-align: center; }
 .calarea { touch-action: pan-y; min-height: calc(100vh - 140px); }
 .weekstrip .dn { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
@@ -592,3 +597,17 @@ details.impai ol li { margin-bottom: 4px; }
 .reliefrow .tcompact { width: 92px; }
 .reliefpick { margin-top: 10px; }
 .pill.ghostpill { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* Month change: a short slide, eased; follows the finger while swiping. */
+.calbody { transition: transform .2s ease-out, opacity .2s ease-out; will-change: transform; }
+@media (prefers-reduced-motion: reduce) { .calbody { transition: opacity .15s; } }
+
+/* ---- calendar: the tapped day in full ---- */
+.peek .kv { grid-template-columns: 92px 1fr; font-size: 14.5px; padding: 8px 0; }
+.peek .kv span:last-child { color: var(--text); }
+.peekbtns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.peekbtns .btn, .peekbtns button { padding: 12px 8px; }
+.peeklink { display: block; text-align: center; margin-top: 10px; font-size: 14px; color: var(--muted); }
+.peekhead b { font-size: 16px; white-space: nowrap; }
+.peekhead b small { font-weight: 400; color: var(--muted); font-size: 13px; margin-left: 4px; }
+.peekhead span { white-space: nowrap; font-size: 14px; }
