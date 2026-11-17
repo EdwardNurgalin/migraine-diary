@@ -1914,7 +1914,30 @@ document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preven
 
 applyTheme(pref.get('theme', 'moss'));
 applyDim();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => { });
+// Offline copy and updates (see sw.js). On this computer during development the worker is off, so edits show at once.
+if ('serviceWorker' in navigator) {
+  if (['localhost', '127.0.0.1'].includes(location.hostname) && pref.get('dev_sw') !== '1') {
+    navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(() => { });
+  } else {
+    const hadWorker = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('./sw.js').then(reg => reg.update()).catch(() => { });
+    // A new version has taken over: reload once into it, unless she is in the middle of filling something in
+    // (then it simply opens next time).
+    let switched = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadWorker || switched || wz?.dirty || qs) return;
+      switched = true;
+      location.reload();
+    });
+  }
+}
 // Ask the browser not to evict the diary's storage when space runs low.
 navigator.storage?.persist?.().catch(() => { });
 route();
+// Fresh weather arrives in the background; redraw only screens that show it, never a form being filled in.
+const redrawForWeather = () => api.weatherUpdate().then(changed => {
+  const name = (location.hash.slice(1) || 'diary').split('/')[0];
+  if (changed && !qs && !wz && ['diary', 'today', 'day', 'calendar', 'data'].includes(name)) route();
+});
+redrawForWeather();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) redrawForWeather(); });

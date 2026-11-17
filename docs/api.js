@@ -7,9 +7,16 @@ import * as weather from './weather.js';
 const EFFECTS = new Set(['full', 'partial', 'none', null]);
 const BACKUP_FORMAT = 'headache-diary-backup';
 
-async function refreshWeather() {
-  try { await weather.refresh(); } catch (e) { console.warn('weather refresh failed', e); }
+// Weather never holds up a screen: it is fetched in the background (one request at a time), and the app
+// redraws when fresh data arrives. Screens show whatever weather is already stored.
+let weatherJob = null;
+export function weatherUpdate() {
+  weatherJob ??= weather.refresh()
+    .catch(e => { console.warn('weather refresh failed', e); return false; })
+    .finally(() => { weatherJob = null; });
+  return weatherJob;
 }
+const refreshWeather = () => { weatherUpdate(); };
 
 const byDate = rows => Object.fromEntries(rows.map(r => [r.date, r]));
 
@@ -218,7 +225,7 @@ export async function quickContext() {
 
 /** Everything the home screen shows besides the day itself. */
 export async function home() {
-  await refreshWeather();
+  refreshWeather();
   const t = stats.today();
   const [all, medList, mods, w, trackCycle, manual] = await Promise.all([
     store.getAll('days'), store.getAll('meds'), modules(), store.getAll('weather'),
@@ -248,7 +255,7 @@ export async function cycle() {
 }
 
 export async function summary(from, to) {
-  await refreshWeather();
+  refreshWeather();
   // Overuse looks 30 days back from `to`, so load a bit more than the range itself.
   const loadFrom = [from, stats.addDays(to, -29)].sort()[0];
   const [days, w, h, meds, mods] = await Promise.all([

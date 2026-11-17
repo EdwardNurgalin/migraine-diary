@@ -4,6 +4,8 @@ import * as store from './store.js';
 const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
 const GEOCODE_URL = 'https://geocoding-api.open-meteo.com/v1/search';
 const REFRESH_EVERY_MS = 6 * 3600 * 1000;
+// After a failed attempt (no signal, the service unreachable) wait before trying again, instead of on every opening.
+const RETRY_AFTER_FAIL_MS = 30 * 60 * 1000;
 
 async function getJSON(url, params, timeoutMs = 10000) {
   const ctrl = new AbortController();
@@ -28,14 +30,23 @@ export async function geocode(query) {
   }));
 }
 
-/** Fetch the last ~3 months of hourly data and store daily means. No-op if fresh, offline or no city set. */
+/**
+ * Fetch the last ~3 months of hourly data and store daily means.
+ * Returns true when new data was saved; false if fresh, offline, no city set, or a recent attempt failed.
+ */
 export async function refresh(force = false) {
   const city = await store.getSetting('city');
-  if (!city) return;
+  if (!city) return false;
   const last = await store.getSetting('weather_fetched_at');
-  if (!force && last && Date.now() - last < REFRESH_EVERY_MS) return;
-  if (!navigator.onLine) return;
+  if (!force && last && Date.now() - last < REFRESH_EVERY_MS) return false;
+  const failed = await store.getSetting('weather_failed_at');
+  if (!force && failed && Date.now() - failed < RETRY_AFTER_FAIL_MS) return false;
+  if (!navigator.onLine) return false;
+  try { await load(city); } catch (e) { await store.setSetting('weather_failed_at', Date.now()); throw e; }
+  return true;
+}
 
+async function load(city) {
   const data = await getJSON(FORECAST_URL, {
     latitude: city.lat,
     longitude: city.lon,
@@ -43,7 +54,7 @@ export async function refresh(force = false) {
     past_days: 92,
     forecast_days: 3, // tomorrow's pressure feeds the risk forecast
     timezone: city.timezone || 'auto',
-  }, 20000);
+  }, 12000);
   const h = data.hourly;
 
   const buckets = {};
@@ -73,6 +84,7 @@ export async function refresh(force = false) {
   });
   await store.putMany('weather', rows);
   await store.setSetting('weather_fetched_at', Date.now());
+  await store.setSetting('weather_failed_at', null);
 }
 
 function prevDay(iso) {
