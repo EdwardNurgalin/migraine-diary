@@ -321,7 +321,12 @@ export function menstrualWindow(days, cyc) {
 }
 
 const toMin = t => t ? +t.slice(0, 2) * 60 + +t.slice(3, 5) : null;
-const median = xs => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+// Middle value; with an even count, the average of the two middle ones (rounded to whole minutes).
+const median = xs => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b), h = Math.floor(s.length / 2);
+  return s.length % 2 ? s[h] : Math.round((s[h - 1] + s[h]) / 2);
+};
 
 /**
  * Acute treatment: share of doses after which the pain was gone / better / unchanged two hours later,
@@ -332,12 +337,18 @@ export function medEfficacy(days, medsById) {
   for (const d of days) for (const a of d.attacks) for (const x of a.doses) {
     const m = medsById.get(x.med_id);
     if (!m || m.kind === 'preventive') continue;
-    if (!by.has(m.id)) by.set(m.id, { name: m.name, dose: m.dose, kind: m.kind, n: 0, rated: 0, free: 0, better: 0, none: 0, delays: [], early: [0, 0], late: [0, 0] });
+    if (!by.has(m.id)) by.set(m.id, { name: m.name, dose: m.dose, kind: m.kind, n: 0, rated: 0, free: 0, better: 0, none: 0, delays: [], reliefs: [], early: [0, 0], late: [0, 0] });
     const e = by.get(m.id);
     e.n++;
     let delay = toMin(x.time) != null && toMin(a.start_time) != null ? toMin(x.time) - toMin(a.start_time) : null;
     if (delay != null && delay < 0) delay += 1440;
     if (delay != null) e.delays.push(delay);
+    // Minutes from taking it to feeling it work (only when she noted the time it helped).
+    if (x.effect && x.effect !== 'none' && toMin(x.relief_time) != null && toMin(x.time) != null) {
+      let r = toMin(x.relief_time) - toMin(x.time);
+      if (r < 0) r += 1440;
+      if (r <= 720) e.reliefs.push(r);
+    }
     if (!x.effect) continue;
     e.rated++;
     e[{ full: 'free', partial: 'better', none: 'none' }[x.effect]]++;
@@ -347,6 +358,7 @@ export function medEfficacy(days, medsById) {
   return [...by.values()].map(e => ({
     name: e.name, dose: e.dose, kind: e.kind, n: e.n, rated: e.rated, free: e.free, better: e.better, none: e.none,
     median_delay: median(e.delays),
+    median_relief: median(e.reliefs), relief_n: e.reliefs.length,
     early: e.early[1] ? { helped: e.early[0], of: e.early[1] } : null,
     late: e.late[1] ? { helped: e.late[0], of: e.late[1] } : null,
   })).sort((a, b) => b.n - a.n);

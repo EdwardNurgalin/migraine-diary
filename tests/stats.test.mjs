@@ -193,3 +193,12 @@ test('typical attack: what at least half of the recent described attacks had', (
   assert.equal(typicalAttack(days.slice(0, 2)), null); // fewer than 3 described attacks
   assert.deepEqual(typicalAttack(days), { location: ['left'], character: ['pulsating'], symptoms: ['photo', 'nausea'], of: 3 });
 });
+
+test('time to relief: median minutes from the dose to when it helped; "не помогло" is not counted', () => {
+  const meds = new Map([[1, { id: 1, name: 'Капориза', dose: '10 мг', kind: 'triptan' }]]);
+  const day = (date, time, relief, effect) => ({ date, attacks: [{ start_time: '09:00', doses: [{ med_id: 1, time, relief_time: relief, effect }] }] });
+  const [m] = medEfficacy([day('2026-10-01', '09:30', '10:10', 'full'), day('2026-10-02', '23:40', '00:30', 'partial'),
+    day('2026-10-03', '10:00', '11:30', 'full'), day('2026-10-04', '09:15', '09:45', 'none')], meds);
+  assert.equal(m.relief_n, 3);
+  assert.equal(m.median_relief, 50); // 40, 50 (past midnight), 90
+});

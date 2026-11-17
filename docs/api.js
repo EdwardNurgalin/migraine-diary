@@ -76,6 +76,8 @@ export async function saveDay(date, body) {
     if (!EFFECTS.has(x.effect)) throw new Error('Некорректный эффект');
     // Dose of this intake when it differs from the medicine's usual one (e.g. «100 мг», «½ таблетки»).
     x.dose = typeof x.dose === 'string' && x.dose.trim() ? x.dose.trim().slice(0, 40) : null;
+    // When it helped: a time only for «прошло» / «легче».
+    x.relief_time = x.effect && x.effect !== 'none' && TIME_RE.test(x.relief_time || '') ? x.relief_time : null;
   }
   const defs = factorMap(await modules());
   // Keys of factors that no longer exist (a removed custom factor) are dropped, not rejected.
@@ -415,10 +417,12 @@ export async function pendingEffects() {
   return out;
 }
 
-export async function setEffect(date, ai, di, effect) {
+export async function setEffect(date, ai, di, effect, reliefTime) {
   const d = await store.get('days', date);
   if (!d?.attacks[ai]?.doses[di] || !EFFECTS.has(effect)) throw new Error('Не нашёл этот приём');
-  d.attacks[ai].doses[di].effect = effect;
+  const x = d.attacks[ai].doses[di];
+  x.effect = effect;
+  if (reliefTime !== undefined) x.relief_time = effect !== 'none' && TIME_RE.test(reliefTime || '') ? reliefTime : null;
   await store.put('days', d);
 }
 
@@ -588,7 +592,8 @@ export async function aiPrompt(from, to) {
     const doses = [...d.attacks.flatMap(a => a.doses.map(x => [x, a])), ...d.doses.map(x => [x, null])].map(([x, a]) => {
       const m = medsById.get(x.med_id);
       const delay = a ? minutesBetween(a.start_time, x.time) : null;
-      return `${m ? `${m.name} ${x.dose || m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}`;
+      const relief = x.relief_time && x.time ? minutesBetween(x.time, x.relief_time) : null;
+      return `${m ? `${m.name} ${x.dose || m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}${x.relief_time ? `, подействовало в ${x.relief_time}${relief != null ? ` (через ${relief} мин после приёма)` : ''}` : ''}`;
     });
     if (doses.length) parts.push('лекарства: ' + doses.join('; '));
     const f = Object.entries(d.factors)
@@ -620,6 +625,7 @@ export async function aiPrompt(from, to) {
   const monthsText = an.monthly.map(m => `${m.month}: заполнено ${m.logged} из ${m.days} дн., с болью ${m.headache} (≈${m.headache_per30 ?? '—'} на 30 дней), похоже на мигрень ${m.migraine}, с обезболивающими ${m.med}`).join('\n');
   const medsText = an.meds.map(m => `${m.name} ${m.dose}`.trim() + `: приёмов ${m.n}, оценено ${m.rated} — прошло ${m.free}, легче ${m.better}, не помогло ${m.none}` +
     (m.median_delay != null ? `; обычно через ${m.median_delay} мин от начала боли` : '') +
+    (m.median_relief != null ? `; начинает действовать в среднем через ${m.median_relief} мин после приёма (по ${m.relief_n})` : '') +
     (m.early && m.late ? `; помогло при приёме в первый час ${m.early.helped} из ${m.early.of}, позже — ${m.late.helped} из ${m.late.of}` : '')).join('\n');
   const prevText = an.preventive.map(x => `${x.name} ${x.dose}`.trim() + ` с ${x.start}${x.stop ? ` по ${x.stop}` : ''}: дней с болью на 30 дней до — ${x.before?.per30 ?? 'мало данных'}, после первого месяца — ${x.after?.per30 ?? 'мало данных'}` +
     (x.change != null ? ` (${x.change > 0 ? '+' : ''}${x.change}%)` : '')).join('\n');

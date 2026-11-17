@@ -38,6 +38,8 @@ const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())
 const parseISO = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const addDays = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); return iso(d); };
 const today = () => iso(new Date());
+const addMinutes = (t, n) => { const m = ((+t.slice(0, 2) * 60 + +t.slice(3) + n) % 1440 + 1440) % 1440; return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`; };
+const minsBetween = (a, b) => { if (!a || !b) return null; let m = (+b.slice(0, 2) * 60 + +b.slice(3)) - (+a.slice(0, 2) * 60 + +a.slice(3)); if (m < 0) m += 1440; return m; };
 const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const fmtDate = s => { const d = parseISO(s); return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`; };
 const fmtDateFull = s => { const d = parseISO(s); return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`; };
@@ -327,7 +329,7 @@ async function renderDiary(d) {
       <p style="font-size:14px">«Поделиться» → «На экран „Домой“». Дальше открывайте иконку: записи из вкладки Safari в ней не появятся.</p></div>` : ''}
     <div class="weekstrip"><div class="weeks" aria-label="Дни, листаются влево и вправо">${strip}</div></div>
     ${pending.map(x => `<div class="card effcard"><div>Помог ли ${esc(x.name)}, принятый ${x.date === today() ? '' : 'вчера '}в ${x.time}?</div>
-      <div class="effbtns">${Object.entries(L.effects).map(([k, v]) => `<button data-eff="${k}" data-date="${x.date}" data-ai="${x.ai}" data-di="${x.di}">${v}</button>`).join('')}</div></div>`).join('')}
+      <div class="effbtns">${Object.entries(L.effects).map(([k, v]) => `<button data-eff="${k}" data-date="${x.date}" data-ai="${x.ai}" data-di="${x.di}" data-taken="${x.time}">${v}</button>`).join('')}</div></div>`).join('')}
     ${statusCard(day, h)}
     ${!day.day ? '' : isToday ? `<details class="daymore"><summary>Подробности дня</summary>${dayCard(day)}</details>` : dayCard(day)}
     ${isToday ? riskCard(h.risk) + medsMeter(h.overuse) + monthTiles(h) + missedCard(h.missed) : ''}`;
@@ -336,9 +338,22 @@ async function renderDiary(d) {
   weeksEl.scrollLeft = cur.offsetLeft - weeksEl.offsetLeft;
   const again = () => renderDiary(d).catch(err => toast(err.message));
   $view.querySelectorAll('[data-eff]').forEach(b => b.onclick = async () => {
-    await api.setEffect(b.dataset.date, Number(b.dataset.ai), Number(b.dataset.di), b.dataset.eff);
-    toast('Отмечено');
-    again();
+    const { date, ai, di, eff } = b.dataset, taken = b.dataset.taken;
+    await api.setEffect(date, Number(ai), Number(di), eff);
+    if (eff === 'none') { toast('Отмечено'); return again(); }
+    // Second question in the same card: when did it start to work.
+    const card = b.closest('.effcard'), isToday = date === today();
+    const ago = m => { const t = new Date(Date.now() - m * 60000); return `${pad(t.getHours())}:${pad(t.getMinutes())}`; };
+    const opts = isToday ? [['Только что', nowTime()], ['30 мин назад', ago(30)], ['1 ч назад', ago(60)]] : [];
+    card.innerHTML = `<div>${eff === 'full' ? 'Во сколько прошло?' : 'Во сколько стало легче?'}</div>
+      <div class="pills reliefpick">${opts.map(([t, v]) => `<button class="pill" data-relief="${v}">${t}</button>`).join('')}
+        <button class="pill" data-relief-pick>Другое время</button><button class="pill ghostpill" data-relief="">Не помню</button></div>`;
+    const save = async v => { await api.setEffect(date, Number(ai), Number(di), eff, v || null); toast('Отмечено'); again(); };
+    card.querySelectorAll('[data-relief]').forEach(x => x.onclick = () => save(x.dataset.relief));
+    card.querySelector('[data-relief-pick]').onclick = async () => {
+      const v = await pickTime('Во сколько стало легче', null, taken ? addMinutes(taken, 60) : nowTime());
+      if (v) save(v);
+    };
   });
   $view.querySelector('[data-hide-hint]')?.addEventListener('click', e => { pref.set('install_hint_hidden', '1'); e.target.closest('.banner').remove(); });
   $view.querySelector('[data-no-pain]')?.addEventListener('click', async () => {
@@ -477,7 +492,7 @@ function riskCard(r) {
 const showInstallHint = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && !standalone() && pref.get('install_hint_hidden') !== '1';
 
 const dayType = data => !data.day.headache ? 'none' : data.attacks.some(x => x.migraine) ? 'migraine' : 'headache';
-const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${doseOf(x) ? ' ' + esc(doseOf(x)) : ''}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; };
+const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${doseOf(x) ? ' ' + esc(doseOf(x)) : ''}${x.time ? ' в ' + x.time : ''}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}${x.relief_time ? ` в ${x.relief_time}${x.time ? ` (через ${fmtMinutes(minsBetween(x.time, x.relief_time))})` : ''}` : ''}`; };
 
 function dayCard(data) {
   const day = data.day, type = dayType(data), many = data.attacks.length > 1;
@@ -519,7 +534,7 @@ async function startWizard(d, headache) {
   const data = await api.day(d);
   const day = data.day;
   const a = data.attacks[0];
-  const toDose = x => ({ med_id: x.med_id, time: x.time || '', effect: x.effect, dose: x.dose ?? null });
+  const toDose = x => ({ med_id: x.med_id, time: x.time || '', effect: x.effect, dose: x.dose ?? null, relief_time: x.relief_time || '' });
   const toAttack = x => ({
     start_time: x.start_time || '', end_time: x.end_time || '', intensity: x.intensity,
     location: [...x.location], character: [...x.character], symptoms: [...x.symptoms], note: x.note || '', doses: x.doses.map(toDose),
@@ -571,7 +586,7 @@ function factorRow(f, v) {
 
 // Time is a button; tapping it opens drums like the iPhone alarm clock, always 24-hour.
 function timeField(path, value, label = '') {
-  return `${label ? `<span class="tlabel">${label}</span>` : ''}<button type="button" class="tbtn ${value ? '' : 'empty'}" data-time-path="${path}" data-label="${esc(label || 'Время')}">${value || '--:--'}</button>`;
+  return `${label ? `<span class="tlabel">${label}</span>` : ''}<button type="button" class="tbtn ${value ? '' : 'empty'}" data-time-path="${path}" data-label="${esc(label || (path.endsWith('relief_time') ? 'Во сколько помогло' : 'Время'))}">${value || '--:--'}</button>`;
 }
 
 const ROW = 44, LOOPS = 7; // each drum repeats its numbers 7 times and quietly re-centres, so it scrolls round endlessly
@@ -683,6 +698,10 @@ function doseList(path, list) {
       <div class="muted" style="margin-top:10px">Через 2 часа после приёма:</div>
       <div class="pills" style="margin-top:6px">${Object.entries(L.effects).map(([k, v]) =>
         `<button class="pill teal ${x.effect === k ? 'on' : ''}" data-act="effect" data-path="${path}.${i}.effect" data-val="${k}">${v}</button>`).join('')}</div>
+      ${x.effect && x.effect !== 'none' ? `<div class="reliefrow"><span class="rl">${x.effect === 'full' ? 'Прошло' : 'Легче стало'} в</span>
+        <div class="tcompact">${timeField(`${path}.${i}.relief_time`, x.relief_time, '')}</div>
+        <span class="muted">${x.relief_time && x.time ? `через ${fmtMinutes(minsBetween(x.time, x.relief_time))}` : x.relief_time ? '' : 'во сколько?'}</span></div>
+        ${x.relief_time && !x.time ? '<p class="muted" style="margin:4px 0 0">Укажите время приёма вверху — посчитаю, через сколько помогло.</p>' : ''}` : ''}
     </div>`).join('')}</div>
     ${active.length ? `<button class="wide" style="margin-top:10px" data-act="add-dose" data-path="${path}">+ Добавить приём</button>` : ''}`;
 }
@@ -785,7 +804,8 @@ function wizardPayload() {
   // A dose equal to the medicine's usual one is not stored, so changing «Мои лекарства» later still applies to it.
   const clean = list => list.filter(x => x.med_id).map(x => {
     const d = String(x.dose ?? '').trim(), usual = medById(x.med_id)?.dose || '';
-    return { med_id: x.med_id, time: x.time || null, effect: x.effect || null, dose: d && d !== usual ? d.slice(0, 40) : null };
+    return { med_id: x.med_id, time: x.time || null, effect: x.effect || null, dose: d && d !== usual ? d.slice(0, 40) : null,
+      relief_time: x.effect && x.effect !== 'none' && x.relief_time ? x.relief_time : null };
   });
   const byStart = (x, y) => (x.start_time || '99').localeCompare(y.start_time || '99');
   return {
@@ -884,7 +904,8 @@ $view.addEventListener('click', async e => {
   const b = e.target.closest('[data-time-path]');
   if (!b || !wz) return;
   const path = b.dataset.timePath;
-  const fallback = { sleep_start: '23:00', sleep_end: '07:00' }[path];
+  const taken = path.endsWith('.relief_time') ? getPath(wz.draft, path.replace(/relief_time$/, 'time')) : '';
+  const fallback = { sleep_start: '23:00', sleep_end: '07:00' }[path] || (taken ? addMinutes(taken, 60) : undefined);
   const v = await pickTime(b.dataset.label, getPath(wz.draft, path), fallback);
   if (v == null || !wz) return;
   setPath(wz.draft, path, v);
@@ -1406,7 +1427,8 @@ function medBlock(list) {
     return `<div style="margin:12px 0 4px"><div class="spread"><span>${esc(m.name)} ${esc(m.dose)}</span><span class="muted">${m.n} ${plural(m.n, 'приём', 'приёма', 'приёмов')}</span></div>
       <div class="bar"><i style="width:${m.free / n * 100}%;background:var(--none)"></i><i style="width:${m.better / n * 100}%;background:var(--i1)"></i><i style="width:${m.none / n * 100}%;background:var(--i3)"></i></div>
       <span class="muted">через 2 часа: прошло ${m.free} · легче ${m.better} · не помогло ${m.none}${m.n > m.rated ? ` · не отмечено ${m.n - m.rated}` : ''}</span>
-      ${m.median_delay != null ? `<br><span class="muted">обычно через ${fmtMinutes(m.median_delay)} от начала боли${m.early && m.late ? ` · в первый час помогло ${m.early.helped} из ${m.early.of}, позже — ${m.late.helped} из ${m.late.of}` : ''}</span>` : ''}</div>`;
+      ${m.median_relief != null ? `<br><span class="muted">помогает обычно через <b>${fmtMinutes(m.median_relief)}</b> после приёма${m.relief_n < 3 ? ` (по ${m.relief_n} ${plural(m.relief_n, 'приёму', 'приёмам', 'приёмам')})` : ''}</span>` : ''}
+      ${m.median_delay != null ? `<br><span class="muted">принимает обычно через ${fmtMinutes(m.median_delay)} от начала боли${m.early && m.late ? ` · в первый час помогло ${m.early.helped} из ${m.early.of}, позже — ${m.late.helped} из ${m.late.of}` : ''}</span>` : ''}</div>`;
   }).join('');
 }
 
@@ -1536,8 +1558,8 @@ async function renderReport(from, to) {
         <div class="legend"><span><i style="background:var(--none)"></i>без боли</span><span><i style="background:var(--ha)"></i>головная боль</span><span><i style="background:var(--mi)"></i>похоже на мигрень</span><span><i style="background:var(--surface-2)"></i>нет записи</span></div>
       </div>
       ${an.meds.length ? `<div class="card"><h2>Препараты при приступе</h2><table>
-        <tr><th>Препарат</th><th>Приёмов</th><th>Через 2 ч: прошло / легче / нет</th><th>Обычно через</th></tr>
-        ${an.meds.map(m => `<tr><td>${esc(m.name)} ${esc(m.dose)}<br><span class="muted">${L.kinds[m.kind]}</span></td><td>${m.n}</td><td>${m.free} / ${m.better} / ${m.none}${m.n > m.rated ? ` <span class="muted">(не отмечено ${m.n - m.rated})</span>` : ''}</td><td>${m.median_delay != null ? fmtMinutes(m.median_delay) : '—'}</td></tr>`).join('')}
+        <tr><th>Препарат</th><th>Приёмов</th><th>Через 2 ч: прошло / легче / нет</th><th>Принимала через</th><th>Помогало через</th></tr>
+        ${an.meds.map(m => `<tr><td>${esc(m.name)} ${esc(m.dose)}<br><span class="muted">${L.kinds[m.kind]}</span></td><td>${m.n}</td><td>${m.free} / ${m.better} / ${m.none}${m.n > m.rated ? ` <span class="muted">(не отмечено ${m.n - m.rated})</span>` : ''}</td><td>${m.median_delay != null ? fmtMinutes(m.median_delay) : '—'}</td><td>${m.median_relief != null ? fmtMinutes(m.median_relief) : '—'}</td></tr>`).join('')}
       </table></div>` : ''}
       ${fl.length ? `<div class="card"><h2>Возможные провокаторы и защитные факторы</h2><table>
         <tr><th>Фактор</th><th>Дней</th><th>Боль в такие дни</th><th>В остальные</th></tr>
@@ -1549,7 +1571,7 @@ async function renderReport(from, to) {
         ${s.attacks.map(a => `<tr>
           <td>${fmtDate(a.date)}${a.migraine ? '<br><i>мигренеподобный</i>' : ''}</td><td class="nw">${a.start_time || '—'}${a.end_time ? '–<br>' + a.end_time : ''}</td><td class="nw">${dur(a)}</td><td>${a.intensity}${a.disability != null ? `<br><span class="muted">${L.disability[a.disability].toLowerCase()}</span>` : ''}${a.recurred ? '<br><span class="muted">вернулась</span>' : ''}</td>
           <td>${esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character), labelsOf(L.symptoms, a.symptoms)].filter(Boolean).join('; '))}${a.note ? `<br><i>${esc(a.note)}</i>` : ''}</td>
-          <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? `${m.name} ${doseOf(x)}`.trim() : '?')}${x.time ? ' в ' + x.time : ''} — ${x.effect ? `через 2 ч: ${L.effects[x.effect].toLowerCase()}` : 'эффект не отмечен'}`; }).join('<br>') || '—'}</td>
+          <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? `${m.name} ${doseOf(x)}`.trim() : '?')}${x.time ? ' в ' + x.time : ''} — ${x.effect ? `через 2 ч: ${L.effects[x.effect].toLowerCase()}` : 'эффект не отмечен'}${x.relief_time ? `, помогло в ${x.relief_time}${x.time ? ` (через ${fmtMinutes(minsBetween(x.time, x.relief_time))})` : ''}` : ''}`; }).join('<br>') || '—'}</td>
         </tr>`).join('')}
       </table>` : '<p class="muted">Приступов за период нет.</p>'}</div>
       <p class="muted">Сформировано ${fmtDateFull(today())}. Данные заполнены пациентом. «Мигренеподобный» — по признакам приступа (ICHD-3), связи с факторами — статистические совпадения; это не диагноз.</p>

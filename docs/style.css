@@ -585,3 +585,10 @@ details.impai ol li { margin-bottom: 4px; }
 .dlg.info .optrow { padding: 10px 12px; gap: 10px; }
 .dlg.info .optrow .lg-size { width: 22px; display: flex; justify-content: center; }
 .dlg.info .optrow .perl { width: 20px; height: 3px; border-radius: 2px; background: var(--per); display: inline-block; }
+
+/* ---- form: when the medicine helped ---- */
+.reliefrow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.reliefrow .rl { font-size: 14px; color: var(--muted); white-space: nowrap; }
+.reliefrow .tcompact { width: 92px; }
+.reliefpick { margin-top: 10px; }
+.pill.ghostpill { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
