@@ -554,3 +554,10 @@ details.impai { margin-top: 12px; }
 details.impai > summary { cursor: pointer; color: var(--accent); font-size: 15px; padding: 6px 0; }
 details.impai ol { padding-left: 20px; margin: 6px 0 10px; }
 details.impai ol li { margin-bottom: 4px; }
+
+/* ---- form: dose of each intake ---- */
+.doserow { margin-top: 10px; }
+.doserow .dlabel { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
+.doserow .dlabel input { flex: 1; min-width: 0; font-size: 16px; padding: 9px 12px; }
+.doserow .pills { margin-top: 8px; gap: 6px; }
+.pill.small { padding: 6px 11px; font-size: 13.5px; }

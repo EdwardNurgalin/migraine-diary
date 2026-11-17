@@ -74,6 +74,8 @@ export async function saveDay(date, body) {
   for (const x of doses) {
     if (!known.has(x.med_id)) throw new Error('Неизвестное лекарство');
     if (!EFFECTS.has(x.effect)) throw new Error('Некорректный эффект');
+    // Dose of this intake when it differs from the medicine's usual one (e.g. «100 мг», «½ таблетки»).
+    x.dose = typeof x.dose === 'string' && x.dose.trim() ? x.dose.trim().slice(0, 40) : null;
   }
   const defs = factorMap(await modules());
   // Keys of factors that no longer exist (a removed custom factor) are dropped, not rejected.
@@ -523,7 +525,7 @@ export async function csv() {
   for (const d of days.sort((a, b) => a.date.localeCompare(b.date))) {
     const base = { date: d.date, headache: d.headache ? 1 : 0, factors: JSON.stringify(d.factors), period: d.period ? 1 : 0,
       sleep_hours: d.sleep_hours, ...pick(W[d.date], ['pressure', 'pressure_delta', 'temp', 'humidity']), ...pick(H[d.date], ['hrv', 'resting_hr']), note: d.note };
-    const medText = list => list.map(x => { const m = medsById.get(x.med_id); return `${m?.name || '?'} ${m?.dose || ''} [${x.effect || '?'}]`; }).join('; ');
+    const medText = list => list.map(x => { const m = medsById.get(x.med_id); return `${m?.name || '?'} ${x.dose || m?.dose || ''} [${x.effect || '?'}]`; }).join('; ');
     if (!d.attacks.length) rows.push({ ...base, meds: medText(d.doses) });
     for (const a of d.attacks) {
       rows.push({ ...base, migraine_like: stats.isMigraine(a) ? 1 : 0, start_time: a.start_time, end_time: a.end_time, intensity: a.intensity,
@@ -586,7 +588,7 @@ export async function aiPrompt(from, to) {
     const doses = [...d.attacks.flatMap(a => a.doses.map(x => [x, a])), ...d.doses.map(x => [x, null])].map(([x, a]) => {
       const m = medsById.get(x.med_id);
       const delay = a ? minutesBetween(a.start_time, x.time) : null;
-      return `${m ? `${m.name} ${m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}`;
+      return `${m ? `${m.name} ${x.dose || m.dose}`.trim() : '?'}${x.time ? ` в ${x.time}` : ''}${delay != null ? ` (через ${delay} мин от начала)` : ''} — ${EFF_RU[x.effect] || 'эффект не отмечен'}`;
     });
     if (doses.length) parts.push('лекарства: ' + doses.join('; '));
     const f = Object.entries(d.factors)
@@ -686,7 +688,7 @@ export async function importDays(records, kindOf) {
     for (const a of r.attacks) {
       if (known.has(a.start_time || '') && (old?.attacks.length)) continue;
       const doses = [];
-      for (const x of a.doses) doses.push({ med_id: await medId(x.name, x.dose), time: x.time || null, effect: x.effect || null });
+      for (const x of a.doses) doses.push({ med_id: await medId(x.name, x.dose), time: x.time || null, effect: x.effect || null, dose: x.dose || null });
       day.attacks.push({ start_time: a.start_time || null, end_time: a.end_time || null, intensity: a.intensity,
         location: a.location, character: a.character, symptoms: a.symptoms, note: a.note || '', doses, disability: null, recurred: false });
       added++;

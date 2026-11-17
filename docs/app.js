@@ -474,7 +474,7 @@ function riskCard(r) {
 const showInstallHint = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && !standalone() && pref.get('install_hint_hidden') !== '1';
 
 const dayType = data => !data.day.headache ? 'none' : data.attacks.some(x => x.migraine) ? 'migraine' : 'headache';
-const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; };
+const doseText = x => { const m = medById(x.med_id); return `${esc(m ? m.name : '?')}${doseOf(x) ? ' ' + esc(doseOf(x)) : ''}${x.effect ? ' — ' + L.effects[x.effect].toLowerCase() : ''}`; };
 
 function dayCard(data) {
   const day = data.day, type = dayType(data), many = data.attacks.length > 1;
@@ -516,7 +516,7 @@ async function startWizard(d, headache) {
   const data = await api.day(d);
   const day = data.day;
   const a = data.attacks[0];
-  const toDose = x => ({ med_id: x.med_id, time: x.time || '', effect: x.effect });
+  const toDose = x => ({ med_id: x.med_id, time: x.time || '', effect: x.effect, dose: x.dose ?? null });
   const toAttack = x => ({
     start_time: x.start_time || '', end_time: x.end_time || '', intensity: x.intensity,
     location: [...x.location], character: [...x.character], symptoms: [...x.symptoms], note: x.note || '', doses: x.doses.map(toDose),
@@ -650,6 +650,20 @@ function pills(path, dict, selected) {
     `<button class="pill ${selected.includes(k) ? 'on' : ''}" data-act="toggle" data-path="${path}" data-val="${k}">${esc(v)}</button>`).join('')}</div>`;
 }
 
+// Dose of one intake: the usual one from «Мои лекарства» is filled in; it can be typed over or picked
+// from half / usual / double, e.g. «25 мг · 50 мг · 100 мг».
+const doseOf = x => x.dose ?? medById(x.med_id)?.dose ?? '';
+function doseField(path, i, x) {
+  const usual = medById(x.med_id)?.dose || '', cur = doseOf(x);
+  const m = usual.match(/^\s*(\d+(?:[.,]\d+)?)\s*(.*)$/);
+  const fmt = n => `${String(Math.round(n * 100) / 100).replace('.', ',')}${m[2] ? ' ' + m[2] : ''}`;
+  const variants = m ? [...new Set([fmt(+m[1].replace(',', '.') / 2), usual, fmt(+m[1].replace(',', '.') * 2)])] : [];
+  return `<div class="doserow">
+    <label class="dlabel">Доза<input data-path="${path}.${i}.dose" value="${esc(cur)}" placeholder="например, 50 мг" maxlength="40" autocomplete="off"></label>
+    ${variants.length ? `<div class="pills">${variants.map(v => `<button class="pill small ${v === cur ? 'on' : ''}" data-act="dose-set" data-path="${path}.${i}.dose" data-val="${esc(v)}">${esc(v)}${v === usual ? ' · обычно' : ''}</button>`).join('')}</div>` : ''}
+  </div>`;
+}
+
 function doseList(path, list) {
   const active = meds.filter(m => m.active);
   if (!meds.length) return `<div class="card"><p>Сначала добавьте свои лекарства в <a href="#settings">Настройках</a>.</p></div>`;
@@ -657,11 +671,12 @@ function doseList(path, list) {
     <div class="dose">
       <div class="row">
         <select data-path="${path}.${i}.med_id" data-type="number" aria-label="Лекарство">
-          ${meds.filter(m => m.active || m.id === x.med_id).map(m => `<option value="${m.id}" ${m.id === x.med_id ? 'selected' : ''}>${esc(m.name)} ${esc(m.dose)}</option>`).join('')}
+          ${meds.filter(m => m.active || m.id === x.med_id).map(m => `<option value="${m.id}" ${m.id === x.med_id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
         </select>
         <div class="tcompact">${timeField(`${path}.${i}.time`, x.time)}</div>
         <button class="ghost" data-act="rm-dose" data-path="${path}" data-i="${i}" aria-label="Удалить">✕</button>
       </div>
+      ${doseField(path, i, x)}
       <div class="muted" style="margin-top:10px">Через 2 часа после приёма:</div>
       <div class="pills" style="margin-top:6px">${Object.entries(L.effects).map(([k, v]) =>
         `<button class="pill teal ${x.effect === k ? 'on' : ''}" data-act="effect" data-path="${path}.${i}.effect" data-val="${k}">${v}</button>`).join('')}</div>
@@ -764,7 +779,11 @@ function wizardPayload() {
   const factors = { ...dr.factors };
   const seen = wz.steps.filter((st, i) => st.kind === 'module' && wz.visited.has(i)).map(st => st.module);
   for (const m of seen) for (const f of m.factors) if (factors[f.key] == null) factors[f.key] = f.type === 'bool' ? false : 0;
-  const clean = list => list.filter(x => x.med_id).map(x => ({ med_id: x.med_id, time: x.time || null, effect: x.effect || null }));
+  // A dose equal to the medicine's usual one is not stored, so changing «Мои лекарства» later still applies to it.
+  const clean = list => list.filter(x => x.med_id).map(x => {
+    const d = String(x.dose ?? '').trim(), usual = medById(x.med_id)?.dose || '';
+    return { med_id: x.med_id, time: x.time || null, effect: x.effect || null, dose: d && d !== usual ? d.slice(0, 40) : null };
+  });
   const byStart = (x, y) => (x.start_time || '99').localeCompare(y.start_time || '99');
   return {
     headache: dr.headache,
@@ -842,6 +861,7 @@ async function wizardAction(el) {
       break;
     }
     case 'rm-dose': getPath(dr, el.dataset.path).splice(Number(el.dataset.i), 1); break;
+    case 'dose-set': setPath(dr, el.dataset.path, el.dataset.val); break;
     default: return;
   }
   wz.dirty = true;
@@ -879,6 +899,7 @@ $view.addEventListener('input', e => {
   const v = el.dataset.type === 'number' ? (el.value === '' ? null : Number(el.value)) : el.value;
   setPath(wz.draft, el.dataset.path, v);
   wz.dirty = true;
+  if (el.dataset.path.endsWith('.med_id')) { setPath(wz.draft, el.dataset.path.replace(/med_id$/, 'dose'), null); redraw(); return; }
   if (el.dataset.path === 'attack.intensity') {
     document.getElementById('intVal').textContent = v;
     document.getElementById('intWord').textContent = INTENSITY_WORDS[v];
@@ -1119,7 +1140,7 @@ function drawQuick() {
       ${ctx.meds.length ? `<div class="pills">${ctx.meds.map(m => chip(qs.added.has(m.id), `data-q="med" data-id="${m.id}"`,
         `${esc(m.name)}${m.dose ? ' ' + esc(m.dose) : ''}${qs.added.has(m.id) ? ' · ' + qs.added.get(m.id) : ''}`)).join('')}</div>`
         : '<p class="muted">Добавьте свои лекарства в <a href="#settings" data-q="go">Настройках</a> — здесь появятся кнопки.</p>'}
-      ${earlier.length ? `<p class="muted">Уже записано: ${earlier.map(x => `${esc(medById(x.med_id)?.name || 'лекарство')}${x.time ? ' в ' + x.time : ''}`).join(', ')}</p>` : ''}
+      ${earlier.length ? `<p class="muted">Уже записано: ${earlier.map(x => `${esc(medById(x.med_id)?.name || 'лекарство')} ${esc(doseOf(x))}${x.time ? ' в ' + x.time : ''}`).join(', ')}</p>` : ''}
       ${typ && !typDone ? `<button class="qs-usual" data-q="usual"><b>Как обычно</b><span>${esc(typItems.join(', ').toLowerCase())}</span></button>` : ''}
       <h3>Где и какая</h3>
       <div class="pills">${QUICK_LOC.map(k => chip(loc.has(k), `data-q="tog" data-k="location" data-v="${k}"`, L.location[k])).join('')}
@@ -1521,7 +1542,7 @@ async function renderReport(from, to) {
         ${s.attacks.map(a => `<tr>
           <td>${fmtDate(a.date)}${a.migraine ? '<br><i>мигренеподобный</i>' : ''}</td><td class="nw">${a.start_time || '—'}${a.end_time ? '–<br>' + a.end_time : ''}</td><td class="nw">${dur(a)}</td><td>${a.intensity}${a.disability != null ? `<br><span class="muted">${L.disability[a.disability].toLowerCase()}</span>` : ''}${a.recurred ? '<br><span class="muted">вернулась</span>' : ''}</td>
           <td>${esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character), labelsOf(L.symptoms, a.symptoms)].filter(Boolean).join('; '))}${a.note ? `<br><i>${esc(a.note)}</i>` : ''}</td>
-          <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? m.name + ' ' + m.dose : '?')}${x.time ? ' в ' + x.time : ''} — ${x.effect ? `через 2 ч: ${L.effects[x.effect].toLowerCase()}` : 'эффект не отмечен'}`; }).join('<br>') || '—'}</td>
+          <td>${a.doses.map(x => { const m = medById(x.med_id); return `${esc(m ? `${m.name} ${doseOf(x)}`.trim() : '?')}${x.time ? ' в ' + x.time : ''} — ${x.effect ? `через 2 ч: ${L.effects[x.effect].toLowerCase()}` : 'эффект не отмечен'}`; }).join('<br>') || '—'}</td>
         </tr>`).join('')}
       </table>` : '<p class="muted">Приступов за период нет.</p>'}</div>
       <p class="muted">Сформировано ${fmtDateFull(today())}. Данные заполнены пациентом. «Мигренеподобный» — по признакам приступа (ICHD-3), связи с факторами — статистические совпадения; это не диагноз.</p>
