@@ -112,18 +112,16 @@ label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px;
 .tp-head b { font-weight: 500; }
 .tp-head .tp-ok { color: var(--accent); font-weight: 500; font-size: 17px; }
 .tp-head button { font-size: 17px; padding: 10px; }
-.tp-wheels { position: relative; display: flex; justify-content: center; align-items: center; gap: 6px; height: 220px; margin: 6px 0 10px; }
-.tp-band { position: absolute; left: 8px; right: 8px; top: 88px; height: 44px; border-radius: 12px; background: var(--surface-2); }
-.tp-col {
-  position: relative; width: 84px; height: 220px; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none;
-  -webkit-mask-image: linear-gradient(transparent, #000 38%, #000 62%, transparent); mask-image: linear-gradient(transparent, #000 38%, #000 62%, transparent);
-  outline: none; overscroll-behavior: contain;
-}
-.tp-col::-webkit-scrollbar { display: none; }
-.tp-col .tp-pad { height: 88px; }
-.tp-col [data-i] { height: 44px; line-height: 44px; text-align: center; font-size: 24px; color: var(--muted); scroll-snap-align: center; font-variant-numeric: tabular-nums; cursor: pointer; }
-.tp-col [data-i].on { color: var(--text); font-size: 27px; }
-.tp-colon { position: relative; font-size: 26px; color: var(--text); }
+/* Day slider for time: big readout, one track for 24 hours, the part up to the thumb filled. */
+.ts-time { text-align: center; font-size: 46px; font-weight: 500; font-variant-numeric: tabular-nums; margin: 6px 0 4px; }
+input[type="range"].ts-range { -webkit-appearance: none; appearance: none; width: 100%; height: 12px; border-radius: 6px; padding: 0; border: 0; margin: 14px 0 6px;
+  background: linear-gradient(90deg, var(--accent) var(--p, 50%), var(--surface-2) var(--p, 50%)); }
+input[type="range"].ts-range::-webkit-slider-thumb { -webkit-appearance: none; width: 34px; height: 34px; border-radius: 50%; background: var(--text); border: 4px solid var(--surface); box-shadow: 0 1px 4px rgba(0, 0, 0, .3); }
+input[type="range"].ts-range::-moz-range-thumb { width: 30px; height: 30px; border-radius: 50%; background: var(--text); border: 4px solid var(--surface); }
+.ts-scale { display: flex; justify-content: space-between; font-size: 12px; color: var(--faint); padding: 0 4px; }
+.ts-fine { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 16px; }
+.ts-fine button { padding: 12px 6px; }
+.ts-clear { margin-top: 6px; }
 .tp-extra { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sleeprow .fbody .fval { margin-top: 2px; }
 
@@ -611,3 +609,8 @@ details.impai ol li { margin-bottom: 4px; }
 .peekhead b { font-size: 16px; white-space: nowrap; }
 .peekhead b small { font-weight: 400; color: var(--muted); font-size: 13px; margin-left: 4px; }
 .peekhead span { white-space: nowrap; font-size: 14px; }
+
+/* ---- calendar month view: exactly one screen, no vertical scrolling ---- */
+html:has(body.calfit), body.calfit { overflow: hidden; overscroll-behavior: none; height: 100%; }
+body.calfit .calarea { touch-action: none; min-height: 0; }
+body.calfit #peek .peek { margin-top: 12px; }

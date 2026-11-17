@@ -147,6 +147,7 @@ async function route() {
   document.querySelectorAll('body > .overlay').forEach(x => x.remove());
   document.body.classList.toggle('wizard', name === 'log');
   document.body.classList.toggle('home', TAB_OF[name] === 'diary');
+  document.body.classList.remove('calfit');
   applyDim(0);
   document.querySelectorAll('.tabs a').forEach(el => el.classList.toggle('on', el.dataset.tab === TAB_OF[name]));
   window.scrollTo(0, 0);
@@ -512,7 +513,7 @@ function dayRows(data, cycleDay = null) {
       rows.push(['Сила', `${a.intensity} из 10 · ${INTENSITY_WORDS[a.intensity]}`]);
     }
     if (a.location.length || a.character.length) rows.push([many ? '' : 'Боль', esc([labelsOf(L.location, a.location), labelsOf(L.character, a.character)].filter(Boolean).join('; '))]);
-    if (a.symptoms.length) rows.push([many ? '' : 'Симптомы', esc(labelsOf(L.symptoms, a.symptoms))]);
+    if (a.symptoms.length) rows.push([many ? '' : 'Симптомы', esc(labelsOf(L.symptoms, a.symptoms).replace(/ \([^)]*\)/g, ''))]);
     if (a.recurred) rows.push([many ? '' : 'Повтор', 'боль возвращалась']);
     if (a.note) rows.push([many ? '' : 'О приступе', esc(a.note)]);
   });
@@ -600,69 +601,44 @@ function timeField(path, value, label = '') {
   return `${label ? `<span class="tlabel">${label}</span>` : ''}<button type="button" class="tbtn ${value ? '' : 'empty'}" data-time-path="${path}" data-label="${esc(label || (path.endsWith('relief_time') ? 'Во сколько помогло' : 'Время'))}">${value || '--:--'}</button>`;
 }
 
-const ROW = 44, LOOPS = 7; // each drum repeats its numbers 7 times and quietly re-centres, so it scrolls round endlessly
-function drum(n, cur) {
-  const mid = Math.floor(LOOPS / 2) * n;
-  const items = Array.from({ length: n * LOOPS }, (_, i) => `<div data-i="${i}">${pad(i % n)}</div>`).join('');
-  return { html: `<div class="tp-col" data-n="${n}" tabindex="0"><div class="tp-pad"></div>${items}<div class="tp-pad"></div></div>`, start: mid + cur };
-}
-
+// Time is picked on one slider for the whole day (00:00–23:55, 5-minute steps), with ±5 min buttons for precision.
 /** Resolves to "HH:MM", "" when cleared, or null when cancelled. */
 function pickTime(title, value, fallback) {
   return new Promise(resolve => {
-    const [h0, m0] = (value || fallback || nowTime()).split(':').map(Number);
-    const hd = drum(24, h0), md = drum(60, m0);
+    const toMin = t => +t.slice(0, 2) * 60 + +t.slice(3);
+    const fmt = m => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+    let cur = toMin(value || fallback || nowTime());
     const box = document.createElement('div');
     box.className = 'overlay';
     box.innerHTML = `<div class="dlg-back"></div>
       <div class="tp" role="dialog" aria-modal="true" aria-label="${esc(title)}">
         <div class="tp-head"><button class="ghost" data-tp="cancel">Отмена</button><b>${esc(title)}</b><button class="ghost tp-ok" data-tp="ok">Готово</button></div>
-        <div class="tp-wheels"><i class="tp-band"></i>${hd.html}<span class="tp-colon">:</span>${md.html}</div>
-        <div class="tp-extra"><button data-tp="now">Сейчас</button><button data-tp="clear">Очистить</button></div>
+        <div class="ts-time" aria-live="polite"></div>
+        <input type="range" class="ts-range" min="0" max="1435" step="5" aria-label="${esc(title)}">
+        <div class="ts-scale"><span>0:00</span><span>6:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+        <div class="ts-fine"><button data-tp="-5">−5 мин</button><button data-tp="now">Сейчас</button><button data-tp="+5">+5 мин</button></div>
+        <button class="ghost wide ts-clear" data-tp="clear">Очистить</button>
       </div>`;
     document.body.append(box);
-    const cols = [...box.querySelectorAll('.tp-col')];
-    const value_ = col => Math.round(col.scrollTop / ROW) % Number(col.dataset.n);
-    const mark = col => {
-      const i = Math.round(col.scrollTop / ROW);
-      col.querySelector('.on')?.classList.remove('on');
-      col.querySelector(`[data-i="${i}"]`)?.classList.add('on');
+    const range = box.querySelector('.ts-range'), out = box.querySelector('.ts-time');
+    const show = () => {
+      out.textContent = fmt(cur);
+      range.value = cur;
+      range.style.setProperty('--p', `${cur / 1435 * 100}%`);
     };
-    const setTo = (col, v, smooth = false) => {
-      const n = Number(col.dataset.n);
-      col.scrollTo({ top: (Math.floor(LOOPS / 2) * n + v) * ROW, behavior: smooth ? 'smooth' : 'auto' });
-      mark(col);
-    };
-    cols.forEach((col, k) => {
-      setTo(col, k ? m0 : h0);
-      let timer;
-      col.addEventListener('scroll', () => {
-        mark(col);
-        clearTimeout(timer);
-        timer = setTimeout(() => { // settled: jump back to the middle copy if close to an end
-          const n = Number(col.dataset.n), i = Math.round(col.scrollTop / ROW);
-          if (i < n * 2 || i >= n * (LOOPS - 2)) setTo(col, i % n);
-        }, 140);
-      });
-      col.addEventListener('click', e => {
-        const it = e.target.closest('[data-i]');
-        if (it) col.scrollTo({ top: Number(it.dataset.i) * ROW, behavior: 'smooth' });
-      });
-      col.addEventListener('keydown', e => {
-        const d = { ArrowUp: -1, ArrowDown: 1 }[e.key];
-        if (d) { e.preventDefault(); col.scrollBy({ top: d * ROW }); }
-      });
-    });
+    range.addEventListener('input', () => { cur = Number(range.value); show(); });
     const done = v => { box.remove(); resolve(v); };
     box.querySelector('.dlg-back').onclick = () => done(null);
     box.querySelectorAll('[data-tp]').forEach(b => b.onclick = () => {
       const a = b.dataset.tp;
-      if (a === 'cancel') done(null);
-      else if (a === 'clear') done('');
-      else if (a === 'ok') done(`${pad(value_(cols[0]))}:${pad(value_(cols[1]))}`);
-      else { const [h, m] = nowTime().split(':').map(Number); setTo(cols[0], h, true); setTo(cols[1], m, true); }
+      if (a === 'cancel') return done(null);
+      if (a === 'clear') return done('');
+      if (a === 'ok') return done(fmt(cur));
+      cur = a === 'now' ? toMin(nowTime()) : ((cur + Number(a)) % 1440 + 1440) % 1440;
+      show();
     });
-    cols[0].focus();
+    show();
+    range.focus();
   });
 }
 
@@ -1066,6 +1042,14 @@ async function renderCalendar(ym) {
   area.addEventListener('click', e => { if (area.dataset.swiped) { e.stopPropagation(); e.preventDefault(); delete area.dataset.swiped; } }, true);
   $view.querySelector('[data-view-toggle]').onclick = () => { pref.set('cal_view', list ? 'month' : 'list'); renderCalendar(ym); };
   $view.querySelectorAll('[data-day]').forEach(b => b.onclick = () => showPeek(b.dataset.day, cyc).catch(err => toast(err.message)));
+  // Month view fills exactly one screen (no scrolling up and down); the space under the month shows a day:
+  // the one tapped last in this month, else today, else the latest recorded day of the month.
+  document.body.classList.toggle('calfit', !list);
+  if (!list) {
+    const days = data.series.filter(p => p.date <= t);
+    const pick = [calSlide.day, t, days.filter(p => p.logged).at(-1)?.date].find(x => x && x.startsWith(ym) && x <= t);
+    if (pick) showPeek(pick, cyc).catch(err => toast(err.message));
+  }
   $view.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { location.hash = `#diary/${b.dataset.open}`; });
 }
 
@@ -1085,6 +1069,7 @@ function monthGrid(data, cyc, pr, ym) {
 
 // Tapping a day shows everything recorded for it right under the month, with the actions that make sense.
 async function showPeek(date, cyc) {
+  calSlide.day = date;
   const data = await api.day(date);
   $view.querySelectorAll('.cd .num').forEach(el => el.classList.toggle('sel', el.closest('[data-day]').dataset.day === date));
   const cd = CFG.trackCycle ? cyc.dayOf(date) : null;
@@ -1110,7 +1095,20 @@ async function showPeek(date, cyc) {
       ${dayRows(data, cd).map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join('')}
       <div class="peekbtns"><a class="btn" href="#log/${date}/${data.day.headache ? 'yes' : 'no'}">Изменить</a><a class="btn" href="#diary/${date}">Открыть день</a></div></div>`;
   }
-  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  fitPeek(el);
+}
+
+// Keep the day details inside the screen: drop the last rows that don't fit and say how many are hidden.
+function fitPeek(el) {
+  if (!document.body.classList.contains('calfit')) return;
+  const peek = el.querySelector('.peek'), bar = document.querySelector('.tabs');
+  if (!peek || !bar) return;
+  const room = bar.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+  const rows = [...peek.querySelectorAll('.kv')];
+  let hidden = 0;
+  while (peek.offsetHeight > room && rows.length) { rows.pop().remove(); hidden++; }
+  const open = peek.querySelector('a[href^="#diary/"]');
+  if (hidden && open) open.textContent = `Ещё ${hidden} строк${hidden === 1 ? 'а' : hidden < 5 ? 'и' : ''} →`;
 }
 
 // The month as a readable log: newest day first, one row per day.
