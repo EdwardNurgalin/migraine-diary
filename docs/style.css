@@ -17,6 +17,7 @@
   --per: #c09297;
   --med: #cdb684;
   --med-t: #9fb0c8;
+  --med2: #efe3c2;
   --head: #1d2420;
   --warn-bg: #352f1f;
   --warn: #d8c08a;
@@ -34,7 +35,7 @@
 :root[data-theme="dusk"] {
   --bg: #1d1a17; --surface: #28231f; --surface-2: #322c27; --line: #3a332d;
   --text: #e0d6c8; --muted: #9d9183; --faint: #5f564c; --accent: #c9a46c; --on-accent: #2a1f10;
-  --none: #8fa88f; --ha: #cf9a7c; --mi: #a08bb8; --on-pain: #1d1612; --per: #c08b95; --med: #d6bd8c; --med-t: #a9b6cf; --head: #231f1b;
+  --none: #8fa88f; --ha: #cf9a7c; --mi: #a08bb8; --on-pain: #1d1612; --per: #c08b95; --med: #d6bd8c; --med2: #f1e4c8; --med-t: #a9b6cf; --head: #231f1b;
   --warn-bg: #3a3020; --warn: #e2c58c; --over-bg: #3d2522; --over: #e7a89b; --ok-bg: #2a2d24; --ok: #b9cfa9;
   --i1: #dcc58e; --i2: #d4a77d; --i3: #cf9a7c; --i4: #b07462;
   color-scheme: dark;
@@ -42,7 +43,7 @@
 :root[data-theme="paper"] {
   --bg: #ebe6dc; --surface: #f3efe7; --surface-2: #e2dccf; --line: #d6cfc1;
   --text: #3a3935; --muted: #716d65; --faint: #aaa498; --accent: #5f8a74; --on-accent: #f3efe7;
-  --none: #8fb8a0; --ha: #d4a07c; --mi: #a693c4; --on-pain: #2b2622; --per: #c98f9a; --med: #b8955a; --med-t: #7f8fb3; --head: #e9e4da;
+  --none: #8fb8a0; --ha: #d4a07c; --mi: #a693c4; --on-pain: #2b2622; --per: #c98f9a; --med: #b8955a; --med2: #dcc49a; --med-t: #7f8fb3; --head: #e9e4da;
   --warn-bg: #f1e4c4; --warn: #6e5214; --over-bg: #f2d9d3; --over: #7f2f24; --ok-bg: #dbe8df; --ok: #2f5b45;
   --i1: #dcc58e; --i2: #d8ad85; --i3: #d4a07c; --i4: #b77a68;
   color-scheme: light;
@@ -135,9 +136,11 @@ label.field > span, .field > .tlabel, .tlabel { display: block; font-size: 13px;
 .num.future { opacity: .55; }
 .num .q { position: absolute; top: 0; right: 3px; font-size: 10px; color: var(--faint); line-height: 1; }
 .num.sel, .num.today { box-shadow: inset 0 0 0 1.5px var(--text); }
-.num .medmark {
-  position: absolute; top: 1px; right: 1px; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--med); box-shadow: 0 0 0 2px var(--bg);
+.num .medmark { position: absolute; top: 2px; right: -1px; }
+/* Medicine taken: a small two-tone capsule, tilted, with a ring of background so it reads over a disk. */
+.medcap {
+  display: inline-block; width: 13px; height: 6px; border-radius: 3px; transform: rotate(35deg);
+  background: linear-gradient(90deg, var(--med) 50%, var(--med2) 50%); box-shadow: 0 0 0 1.5px var(--bg);
 }
 
 /* ---- calendar: chronology ---- */
@@ -561,3 +564,24 @@ details.impai ol li { margin-bottom: 4px; }
 .doserow .dlabel input { flex: 1; min-width: 0; font-size: 16px; padding: 9px 12px; }
 .doserow .pills { margin-top: 8px; gap: 6px; }
 .pill.small { padding: 6px 11px; font-size: 13.5px; }
+
+/* ---- calendar: one top row (view switch · month capsule · i), summary under the grid ---- */
+.calhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0 16px; }
+.calhead .cbtn { width: 38px; height: 38px; flex: none; padding: 0; border-radius: 50%; background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1.5px var(--line); display: flex; align-items: center; justify-content: center; }
+.calhead .cbtn.info { font-style: italic; font-family: Georgia, serif; font-size: 17px; }
+.calhead .mcap { display: flex; align-items: center; gap: 6px; background: var(--surface); border-radius: 999px; padding: 4px 6px; }
+.calhead .mcap b { font-size: 18px; font-weight: 500; min-width: 108px; text-align: center; }
+.calhead .mcap button { background: transparent; color: var(--muted); font-size: 22px; line-height: 1; padding: 4px 12px; border-radius: 999px; }
+.calhead .mcap button:disabled { opacity: .3; }
+.calarea .sumline { margin: 14px 0 0; }
+.calarea .chrono { margin-top: 12px; }
+.crow .cicons { width: 30px; align-items: center; }
+.crow .cicons .perdot { width: 7px; height: 7px; border-radius: 50%; background: var(--per); }
+.crow .cicons .medcap { width: 12px; height: 5.5px; border-radius: 3px; }
+.legend.vert .lg-size .perl { width: 20px; height: 3px; border-radius: 2px; background: var(--per); }
+.legend.vert .lg-size .perl.fc { opacity: .35; }
+.legend.vert .lg-size .todayl { width: 16px; height: 16px; border-radius: 50%; background: transparent; box-shadow: inset 0 0 0 1.5px var(--text); }
+.legend.vert .lg-size .medcap { width: 13px; height: 6px; border-radius: 3px; }
+.dlg.info .optrow { padding: 10px 12px; gap: 10px; }
+.dlg.info .optrow .lg-size { width: 22px; display: flex; justify-content: center; }
+.dlg.info .optrow .perl { width: 20px; height: 3px; border-radius: 2px; background: var(--per); display: inline-block; }

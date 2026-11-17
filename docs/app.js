@@ -88,6 +88,7 @@ function showInfo(title, html) {
   box.querySelector('.dlg-back').onclick = close;
   box.querySelector('[data-ok]').onclick = close;
   box.querySelector('[data-ok]').focus();
+  return box;
 }
 
 // Clipboard API first; the old select-and-copy way when the browser refuses it.
@@ -181,6 +182,8 @@ document.addEventListener('visibilitychange', () => {
 // ---------- Face ID ----------
 // A passkey kept on this phone: the phone itself checks the face (or fingerprint) and only then answers.
 // Like the code, it hides the diary from someone holding the phone; it does not encrypt anything.
+const ICON_LIST = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>';
+const ICON_GRID = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>';
 const FACE_SVG = '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9v1.5M15 9v1.5M12 9v4h-1M9.5 15.5c1.4 1.2 3.6 1.2 5 0"/></svg>';
 const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -285,7 +288,7 @@ function dayMark(p, { selected = false, isToday = false, meds = true } = {}) {
   const future = p.date > today();
   const size = p.headache ? Math.round(13 + Math.max(p.intensity, 1) * 2.3) : 0;
   const cls = ['num', future && 'future', !future && !p.logged && 'unlogged', selected && 'sel', isToday && 'today', size >= 26 && 'dark'].filter(Boolean).join(' ');
-  return `<span class="${cls}">${size ? `<i class="disk" style="width:${size}px;height:${size}px;background:${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"></i>` : ''}<b>${Number(p.date.slice(8))}</b>${!future && !p.logged ? '<sup class="q">?</sup>' : ''}${meds && p.meds ? '<i class="medmark"></i>' : ''}</span>`;
+  return `<span class="${cls}">${size ? `<i class="disk" style="width:${size}px;height:${size}px;background:${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"></i>` : ''}<b>${Number(p.date.slice(8))}</b>${!future && !p.logged ? '<sup class="q">?</sup>' : ''}${meds && p.meds ? '<i class="medmark medcap"></i>' : ''}</span>`;
 }
 
 const WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
@@ -934,25 +937,42 @@ async function renderCalendar(ym) {
   const prev = iso(new Date(y, m - 2, 1)).slice(0, 7), next = iso(new Date(y, m, 1)).slice(0, 7);
   const t = today();
   const n = data.headache_days;
+  const sum = `<p class="sumline"><b>${n}</b> ${plural(n, 'день', 'дня', 'дней')} боли · <b>${data.migraine_days}</b> похоже на мигрень · ${overuseText(data.overuse)}</p>`;
+  const list = pr.view === 'list';
+  // Top row: list/month switch, the month in a capsule right above the numbers, and «i» (legend and display options).
   $view.innerHTML = `<div class="calarea">
-    <div class="monthbar"><h1>${MONTHS[m - 1]}${y !== new Date().getFullYear() ? ' ' + y : ''}</h1>
-      <div class="nav"><button data-cal-info aria-label="Как читать календарь" class="infobtn">i</button><button data-go="${prev}" aria-label="Предыдущий месяц">‹</button><button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div></div>
-    <p class="sumline"><b>${n}</b> ${plural(n, 'день', 'дня', 'дней')} боли · <b>${data.migraine_days}</b> похоже на мигрень · ${overuseText(data.overuse)}</p>
-    <div class="seg" style="margin-bottom:16px">
-      <button data-view="month" class="${pr.view === 'month' ? 'on' : ''}">Месяц</button>
-      <button data-view="list" class="${pr.view === 'list' ? 'on' : ''}">Хронология</button>
+    <div class="calhead">
+      <button class="cbtn" data-view-toggle aria-label="${list ? 'Показать месяцем' : 'Показать списком'}">${list ? ICON_GRID : ICON_LIST}</button>
+      <div class="mcap"><button data-go="${prev}" aria-label="Предыдущий месяц">‹</button><b>${MONTHS[m - 1]}${y !== new Date().getFullYear() ? ' ' + y : ''}</b>
+        <button data-go="${next}" ${next > t.slice(0, 7) ? 'disabled' : ''} aria-label="Следующий месяц">›</button></div>
+      <button class="cbtn info" data-cal-info aria-label="Обозначения и что показывать">i</button>
     </div>
-    ${pr.view === 'list' ? chronology(data, pr) : monthGrid(data, cyc, pr, ym)}</div>`;
+    ${list ? sum + chronology(data, pr) : monthGrid(data, cyc, pr, ym) + sum + '<div id="peek"></div>'}</div>`;
 
   $view.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { location.hash = `#calendar/${b.dataset.go}`; });
-  $view.querySelector('[data-cal-info]').onclick = () => showInfo('Как читать календарь', `<div class="legend vert">
-    <span><i style="background:var(--ha)"></i>головная боль</span>
-    <span><i style="background:var(--mi)"></i>похоже на мигрень</span>
-    <span><i style="background:var(--med)"></i>принимала обезболивающее</span>
-    ${CFG.trackCycle ? '<span><i style="background:var(--per)"></i>линия под днём — менструация, бледная — прогноз</span>' : ''}
-    <span><b class="lg-size"><i class="s1"></i><i class="s2"></i></b>чем больше круг, тем сильнее боль</span>
-    <span><b class="lg-size">?</b>день не заполнен</span></div>
-    <p class="muted">Листайте месяцы свайпом влево и вправо. Нажмите на день, чтобы увидеть подробности.</p>`);
+  $view.querySelector('[data-cal-info]').onclick = () => {
+    const sw = (k, on, label, mark) => `<div class="frow optrow"><span class="lg-size">${mark}</span><div class="fbody"><div class="flabel">${label}</div></div>
+      <button class="switch ${on ? 'on' : ''}" data-cal-toggle="${k}" role="switch" aria-checked="${on}" aria-label="${label}"></button></div>`;
+    const box = showInfo('Как читать календарь', `<div class="legend vert">
+      <span><b class="lg-size"><i style="background:var(--ha)"></i></b>головная боль</span>
+      <span><b class="lg-size"><i style="background:var(--mi)"></i></b>похоже на мигрень</span>
+      <span><b class="lg-size"><i class="s1"></i><i class="s2"></i></b>чем больше круг, тем сильнее боль</span>
+      <span><b class="lg-size"><i class="medcap"></i></b>принимала лекарство от боли</span>
+      ${CFG.trackCycle ? '<span><b class="lg-size"><i class="perl"></i></b>менструация</span><span><b class="lg-size"><i class="perl fc"></i></b>ожидаемая менструация (прогноз)</span>' : ''}
+      <span><b class="lg-size">?</b>день не заполнен</span>
+      <span><b class="lg-size"><i class="todayl"></i></b>сегодня</span>
+      ${list ? '<span><b class="lg-size">+6</b>справа в списке — изменение давления за сутки, гПа</span>' : ''}</div>
+      <h3 style="margin:14px 0 4px">Показывать в календаре</h3>
+      <div class="list">${sw('cal_meds', pr.meds, 'Лекарства', '<i class="medcap"></i>')}${CFG.trackCycle ? sw('cal_cycle', pr.cycle, 'Цикл', '<i class="perl"></i>') : ''}</div>
+      <p class="muted">Месяцы листаются свайпом влево и вправо или стрелками. Кнопка слева от месяца переключает вид: календарь или список дней.</p>`);
+    box.querySelectorAll('[data-cal-toggle]').forEach(b => b.onclick = () => {
+      const k = b.dataset.calToggle, on = pref.get(k, '1') !== '1';
+      pref.set(k, on ? '1' : '0');
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', on);
+      renderCalendar(ym);
+    });
+  };
   // Swipe left or right on the month to change it: a finger on the phone, two fingers on a Mac trackpad.
   const area = $view.querySelector('.calarea');
   const flip = dir => {
@@ -990,12 +1010,7 @@ async function renderCalendar(ym) {
     if (Math.abs(calWheel.acc) > 60) { calWheel.locked = true; flip(calWheel.acc > 0 ? 1 : -1); }
   }, { passive: false });
   area.addEventListener('click', e => { if (area.dataset.swiped) { e.stopPropagation(); e.preventDefault(); delete area.dataset.swiped; } }, true);
-  $view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { pref.set('cal_view', b.dataset.view); renderCalendar(ym); });
-  $view.querySelectorAll('[data-cal-toggle]').forEach(b => b.onclick = () => {
-    const k = b.dataset.calToggle;
-    pref.set(k, pref.get(k, '1') === '1' ? '0' : '1');
-    renderCalendar(ym);
-  });
+  $view.querySelector('[data-view-toggle]').onclick = () => { pref.set('cal_view', list ? 'month' : 'list'); renderCalendar(ym); };
   $view.querySelectorAll('[data-day]').forEach(b => b.onclick = () => showPeek(b.dataset.day, cyc).catch(err => toast(err.message)));
   $view.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { location.hash = `#diary/${b.dataset.open}`; });
 }
@@ -1010,15 +1025,8 @@ function monthGrid(data, cyc, pr, ym) {
     return `<button class="cd" data-day="${p.date}" ${future ? 'disabled' : ''} aria-label="${fmtDate(p.date)}, ${p.type ? L.types[p.type] + (p.headache ? `, сила ${p.intensity}` : '') : 'не заполнен'}${p.meds ? ', лекарства' : ''}${p.period ? ', менструация' : ''}">
       ${dayMark(p, { isToday: p.date === t, meds: pr.meds })}${per}</button>`;
   }).join('');
-  const next = cyc.forecast[0];
   return `
-    <div class="cal">${DOW.map(d => `<div class="dow">${d.toLowerCase()}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>
-    <div class="toggles">
-      <button data-cal-toggle="cal_meds" class="${pr.meds ? 'on' : ''}" aria-pressed="${pr.meds}"><i style="background:var(--med)"></i>Лекарства</button>
-      ${CFG.trackCycle ? `<button data-cal-toggle="cal_cycle" class="${pr.cycle ? 'on' : ''}" aria-pressed="${pr.cycle}"><i style="background:var(--per)"></i>Цикл</button>` : ''}
-    </div>
-    <div id="peek"></div>
-    ${pr.cycle && next && next >= t ? `<p class="muted" style="margin-top:12px">Следующая менструация ожидается около ${fmtDate(next)} (бледная линия).</p>` : ''}`;
+    <div class="cal">${DOW.map(d => `<div class="dow">${d.toLowerCase()}</div>`).join('')}${'<span></span>'.repeat(lead)}${cells}</div>`;
 }
 
 async function showPeek(date, cyc) {
@@ -1056,7 +1064,7 @@ function chronology(data, pr) {
     const body = p.headache
       ? `<span class="cbar"><i style="width:${p.intensity * 10}%;background:${p.type === 'migraine' ? 'var(--mi)' : 'var(--ha)'}"></i></span><b class="cval">${p.intensity}</b>`
       : `<span class="cnote">${p.logged ? 'без боли' : 'не заполнен'}</span>`;
-    const icons = `${pr.meds && p.meds ? '<i style="background:var(--med)"></i>' : ''}${pr.cycle && p.period ? '<i style="background:var(--per)"></i>' : ''}`;
+    const icons = `${pr.meds && p.meds ? '<i class="medcap"></i>' : ''}${pr.cycle && p.period ? '<i class="perdot"></i>' : ''}`;
     const dp = p.pressure_delta;
     return `<button class="crow ${p.logged ? '' : 'unlogged'}" data-open="${p.date}" aria-label="${fmtDate(p.date)}${p.headache ? `, сила ${p.intensity}` : p.logged ? ', без боли' : ', не заполнен'}">
       <span class="cdate">${label}</span>${body}<span class="cicons">${icons}</span>
@@ -1069,7 +1077,6 @@ function chronology(data, pr) {
   const insight = !painDays.length ? 'В этом месяце дней с болью нет.'
     : `Из ${painDays.length} ${plural(painDays.length, 'дня', 'дней', 'дней')} с болью: ${pr.cycle ? `${withPeriod} — во время менструации, ` : ''}${withJump} — при резкой смене давления (±5 гПа за сутки).`;
   return `<p class="insight" style="margin-top:0">${insight}</p>
-    <div class="legend" style="margin:0 0 8px">${pr.meds ? '<span><i style="background:var(--med)"></i>лекарства</span>' : ''}${pr.cycle ? '<span><i style="background:var(--per)"></i>менструация</span>' : ''}<span>справа — давление за сутки, гПа</span></div>
     <div class="chrono">${rows}</div>`;
 }
 
