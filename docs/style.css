@@ -618,3 +618,5 @@ body.calfit #peek .peek { margin-top: 12px; }
 /* Calendar day preview: information only; the whole card opens the day for editing. */
 .peek.tap { cursor: pointer; }
 .peek.tap .peekhead b::after { content: " ›"; color: var(--faint); font-weight: 400; }
+.ts-limit { text-align: center; font-size: 13px; color: var(--muted); margin-top: -2px; }
+.ts-limit.hit { color: var(--warn); }

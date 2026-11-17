@@ -172,6 +172,7 @@ export async function patchAttack(date, patch) {
     } else if (k === 'recurred') a[k] = !!v;
     else throw new Error('Некорректное поле');
   }
+  if (a.start_time && a.end_time && a.end_time < a.start_time) throw new Error('Конец боли раньше начала — выберите время раньше');
   return saveDay(date, { ...day, headache: true });
 }
 

@@ -602,18 +602,25 @@ function timeField(path, value, label = '') {
 }
 
 // Time is picked on one slider for the whole day (00:00–23:55, 5-minute steps), with ±5 min buttons for precision.
-/** Resolves to "HH:MM", "" when cleared, or null when cancelled. */
-function pickTime(title, value, fallback) {
+/**
+ * Resolves to "HH:MM", "" when cleared, or null when cancelled.
+ * `limits` keeps the time inside a range, e.g. the end of an attack not before its start:
+ * { min: "14:30", minNote: "начала боли" } and/or { max: "18:00", maxNote: "конца боли" }.
+ */
+function pickTime(title, value, fallback, limits = {}) {
   return new Promise(resolve => {
     const toMin = t => +t.slice(0, 2) * 60 + +t.slice(3);
     const fmt = m => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
-    let cur = toMin(value || fallback || nowTime());
+    const lo = limits.min ? toMin(limits.min) : 0, hi = limits.max ? toMin(limits.max) : 1439;
+    const clamp = m => Math.min(hi, Math.max(lo, m));
+    let cur = clamp(toMin(value || fallback || nowTime())), bumped = false;
     const box = document.createElement('div');
     box.className = 'overlay';
     box.innerHTML = `<div class="dlg-back"></div>
       <div class="tp" role="dialog" aria-modal="true" aria-label="${esc(title)}">
         <div class="tp-head"><button class="ghost" data-tp="cancel">Отмена</button><b>${esc(title)}</b><button class="ghost tp-ok" data-tp="ok">Готово</button></div>
         <div class="ts-time" aria-live="polite"></div>
+        ${limits.min || limits.max ? `<div class="ts-limit">${[limits.min && `не раньше ${limits.min} — ${limits.minNote}`, limits.max && `не позже ${limits.max} — ${limits.maxNote}`].filter(Boolean).join(' · ')}</div>` : ''}
         <input type="range" class="ts-range" min="0" max="1435" step="5" aria-label="${esc(title)}">
         <div class="ts-scale"><span>0:00</span><span>6:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
         <div class="ts-fine"><button data-tp="-5">−5 мин</button><button data-tp="now">Сейчас</button><button data-tp="+5">+5 мин</button></div>
@@ -622,11 +629,13 @@ function pickTime(title, value, fallback) {
     document.body.append(box);
     const range = box.querySelector('.ts-range'), out = box.querySelector('.ts-time');
     const show = () => {
+      box.querySelector('.ts-limit')?.classList.toggle('hit', bumped);
       out.textContent = fmt(cur);
       range.value = cur;
       range.style.setProperty('--p', `${cur / 1435 * 100}%`);
     };
-    range.addEventListener('input', () => { cur = Number(range.value); show(); });
+    // The track stays a whole day; past the limit the thumb stops at the limit and the note lights up.
+    range.addEventListener('input', () => { const v = Number(range.value); cur = clamp(v); bumped = v !== cur; show(); });
     const done = v => { box.remove(); resolve(v); };
     box.querySelector('.dlg-back').onclick = () => done(null);
     box.querySelectorAll('[data-tp]').forEach(b => b.onclick = () => {
@@ -634,7 +643,9 @@ function pickTime(title, value, fallback) {
       if (a === 'cancel') return done(null);
       if (a === 'clear') return done('');
       if (a === 'ok') return done(fmt(cur));
-      cur = a === 'now' ? toMin(nowTime()) : ((cur + Number(a)) % 1440 + 1440) % 1440;
+      const want = a === 'now' ? toMin(nowTime()) : cur + Number(a);
+      cur = clamp(Math.min(1439, Math.max(0, want)));
+      bumped = want !== cur;
       show();
     });
     show();
@@ -781,6 +792,19 @@ function redraw() {
   window.scrollTo(0, y);
 }
 
+// Before saving: an attack must not end before it starts (e.g. an old record or a typo). Shows the attack to fix.
+function timesOk() {
+  if (!wz.draft.headache) return true;
+  const bad = wz.draft.attacks.findIndex(a => a.start_time && a.end_time && a.end_time < a.start_time);
+  if (bad < 0) return true;
+  wz.ai = bad;
+  wz.step = wz.steps.findIndex(st => st.kind === 'attack');
+  drawWizard();
+  window.scrollTo(0, 0);
+  toast(`${wz.draft.attacks.length > 1 ? `Приступ ${bad + 1}: к` : 'К'}онец боли раньше начала — поправьте время`);
+  return false;
+}
+
 function wizardPayload() {
   const dr = wz.draft;
   // Every factor of a module she actually went through counts as answered (unchanged = "нет" / 0), like a paper
@@ -821,6 +845,7 @@ async function wizardAction(el) {
       wz.step--; wz.visited.add(wz.step); drawWizard(); window.scrollTo(0, 0); return;
     case 'next':
       if (wz.step < wz.steps.length - 1) { wz.step++; wz.visited.add(wz.step); drawWizard(); window.scrollTo(0, 0); return; }
+      if (!timesOk()) return;
       el.disabled = true;
       await api.saveDay(wz.date, wizardPayload());
       wz.dirty = false;
@@ -829,6 +854,7 @@ async function wizardAction(el) {
       return;
     case 'finish':
       // «Завершить»: keep what is filled in so far and leave; the rest can be added later.
+      if (!timesOk()) return;
       el.disabled = true;
       await api.saveDay(wz.date, wizardPayload());
       wz.dirty = false;
@@ -893,7 +919,12 @@ $view.addEventListener('click', async e => {
   const path = b.dataset.timePath;
   const taken = path.endsWith('.relief_time') ? getPath(wz.draft, path.replace(/relief_time$/, 'time')) : '';
   const fallback = { sleep_start: '23:00', sleep_end: '07:00' }[path] || (taken ? addMinutes(taken, 60) : undefined);
-  const v = await pickTime(b.dataset.label, getPath(wz.draft, path), fallback);
+  // Start of an attack not after its end, end not before start; relief not before the dose.
+  const sib = name => getPath(wz.draft, path.replace(/[a-z_]+$/, name)) || null;
+  const limits = path.endsWith('start_time') && path.startsWith('attack.') ? { max: sib('end_time'), maxNote: 'конца боли' }
+    : path.endsWith('end_time') && path.startsWith('attack.') ? { min: sib('start_time'), minNote: 'начала боли' }
+    : path.endsWith('.relief_time') ? { min: taken || null, minNote: 'приёма' } : {};
+  const v = await pickTime(b.dataset.label, getPath(wz.draft, path), fallback, limits);
   if (v == null || !wz) return;
   setPath(wz.draft, path, v);
   wz.dirty = true;
